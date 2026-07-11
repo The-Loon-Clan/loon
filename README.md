@@ -1,4 +1,8 @@
-# loon
+<p align="center">
+  <img src="img/logo.png" alt="loon" width="180">
+</p>
+
+<h1 align="center">loon</h1>
 
 loon is the site framework extracted from the ameNZB indexer: a
 plugin runtime and mediator kernel for building community content
