@@ -97,6 +97,11 @@ type Core struct {
 	// initialised so &Core{} test literals stay valid.
 	extMu sync.Mutex
 	ext   map[string]any
+
+	// Plugin admin views (see views.go): pages a plugin renders
+	// as fragments and the host wraps in its own chrome.
+	viewMu     sync.Mutex
+	adminViews []AdminView
 }
 
 // LoggerFor returns a child logger tagged with plugin=<name>.
