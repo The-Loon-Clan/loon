@@ -98,10 +98,10 @@ type Core struct {
 	extMu sync.Mutex
 	ext   map[string]any
 
-	// Plugin admin views (see views.go): pages a plugin renders
-	// as fragments and the host wraps in its own chrome.
-	viewMu     sync.Mutex
-	adminViews []AdminView
+	// Plugin views (see views.go): pages/tabs/widgets a plugin
+	// renders as fragments and the host wraps in its own chrome.
+	viewMu sync.Mutex
+	views  []View
 }
 
 // LoggerFor returns a child logger tagged with plugin=<name>.

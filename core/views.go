@@ -7,74 +7,128 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ViewKind slots a plugin admin view into the host's page taxonomy — the host
-// groups/labels views by kind (a settings wizard vs a live status page vs a
-// generic content page). Jobs are NOT a view kind: the scheduler already
-// centralizes them and the host renders one jobs page for all plugins.
-type ViewKind string
+// The view system: plugins register renderable UNITS — a full page, a tab, or
+// a small widget ("blob") — and the host decides where each slot's units
+// appear, wrapping every fragment in its own layout/nav/theme. The plugin owns
+// the content; the host owns the chrome. This is how a plugin ships UI
+// (settings, status pages, profile tabs, dashboard cards) without the host
+// writing plugin-specific handlers.
+//
+// A ViewSlot names the host surface a view attaches to. Hosts mount each slot
+// by convention (fragments hardcode these URLs):
+//
+//	SlotAdminSettings  section on the aggregated /admin/settings page;
+//	                   actions POST /admin/settings/<slug>/<action>
+//	SlotAdminPage      standalone admin page GET /admin/p/<slug>;
+//	                   actions POST /admin/p/<slug>/<action>
+//	SlotJobsWidget     replaces the default job table inside the host jobs
+//	                   page's group card whose group name == Anchor (the
+//	                   "list the basics, allow a custom override" contract);
+//	                   no own URL, Actions ignored — buttons post to the
+//	                   plugin's page/settings actions
+//	SlotSitePage       public-facing page GET /p/<slug> (+ actions
+//	                   POST /p/<slug>/<action>), gated by Public/MinRole;
+//	                   hosts list it in the site nav for allowed viewers
+//	SlotSiteWidget     card on the host's home/dashboard, gated by
+//	                   Public/MinRole; Actions ignored
+//	SlotUserWidget     card in a user-profile summary; the SUBJECT (whose
+//	                   profile) arrives via ViewSubject(c)
+//	SlotUserTab        tab on the user-profile page; subject via ViewSubject
+type ViewSlot string
 
 const (
-	ViewSettings ViewKind = "settings"
-	ViewStatus   ViewKind = "status"
-	ViewPage     ViewKind = "page"
+	SlotAdminSettings ViewSlot = "admin.settings"
+	SlotAdminPage     ViewSlot = "admin.page"
+	SlotJobsWidget    ViewSlot = "admin.jobs-widget"
+	SlotSitePage      ViewSlot = "site.page"
+	SlotSiteWidget    ViewSlot = "site.widget"
+	SlotUserWidget    ViewSlot = "user.widget"
+	SlotUserTab       ViewSlot = "user.tab"
 )
 
-// AdminView is a plugin-owned admin page. The PLUGIN renders the page content
-// (from its own embedded templates, using its own data) as an HTML fragment;
-// the HOST wraps the fragment in its chrome — layout, nav, theme — so every
-// plugin page looks native to the site. This is the middle road between
-// core.AdminHandler (self-contained page, loses host chrome) and pure
-// capability rendering (host must hand-build a page per plugin).
-//
-// URL convention (part of the contract — fragments hardcode these):
-//
-//	GET  /admin/p/<slug>            → Render, wrapped by the host
-//	POST /admin/p/<slug>/<action>   → Actions[<action>]
-//
-// An action either redirects (returns "", nil after writing the response) or
-// returns a fragment to re-render the page — e.g. a "test connection" that
-// must keep the submitted form values instead of resetting them.
-type AdminView struct {
-	Slug   string // URL segment, unique across plugins (e.g. "usenet")
-	Title  string // nav + page title (e.g. "Usenet setup")
-	Kind   ViewKind
-	Render func(c *gin.Context) (template.HTML, error)
-	// Actions are POST handlers keyed by action name. A nil map means the view
-	// is read-only.
+// View is one plugin-rendered unit. Render returns an HTML FRAGMENT (no
+// layout); the host wraps it. An action either writes its own response
+// (redirect) and returns ("", nil), or returns a fragment the host re-renders
+// in place — the form-preserving contract (e.g. test-connection keeping the
+// submitted values).
+type View struct {
+	Slug   string // URL segment / stable id, unique per slot
+	Title  string // nav label + page/card/tab title
+	Slot   ViewSlot
+	Anchor string // slot-specific attachment point (SlotJobsWidget: job-group name)
+
+	// Visibility for site.* and user.* slots (admin.* slots additionally sit
+	// behind the host's admin gate regardless of these):
+	//   Public true          → anonymous viewers allowed
+	//   Public false         → viewer must be logged in with Role >= MinRole;
+	//                          the zero MinRole (RoleUser) means any account
+	Public  bool
+	MinRole Role
+
+	Render  func(c *gin.Context) (template.HTML, error)
 	Actions map[string]func(c *gin.Context) (template.HTML, error)
 }
 
-// RegisterAdminView publishes a plugin admin view for the host to mount.
-// Typically called from Provision in the web/all process. Slugs must be
-// unique; Render is required.
-func (c *Core) RegisterAdminView(v AdminView) error {
-	if v.Slug == "" || v.Title == "" {
-		return fmt.Errorf("core: RegisterAdminView requires Slug and Title (got %q/%q)", v.Slug, v.Title)
+// AllowsAnon reports whether anonymous viewers may see the view.
+func (v View) AllowsAnon() bool { return v.Public }
+
+// AllowsUser reports whether u (nil = anonymous) may see the view.
+func (v View) AllowsUser(u *User) bool {
+	if v.Public {
+		return true
+	}
+	return u != nil && u.Role >= v.MinRole
+}
+
+// RegisterView publishes a view for the host to mount. Typically called from
+// Provision in the web/all process. (Slot, Slug) must be unique; Render is
+// required.
+func (c *Core) RegisterView(v View) error {
+	if v.Slug == "" || v.Title == "" || v.Slot == "" {
+		return fmt.Errorf("core: RegisterView requires Slug, Title, and Slot (got %q/%q/%q)", v.Slug, v.Title, v.Slot)
 	}
 	if v.Render == nil {
-		return fmt.Errorf("core: RegisterAdminView %q has nil Render", v.Slug)
-	}
-	if v.Kind == "" {
-		v.Kind = ViewPage
+		return fmt.Errorf("core: RegisterView %s/%q has nil Render", v.Slot, v.Slug)
 	}
 	c.viewMu.Lock()
 	defer c.viewMu.Unlock()
-	for _, ex := range c.adminViews {
-		if ex.Slug == v.Slug {
-			return fmt.Errorf("core: admin view %q registered twice", v.Slug)
+	for _, ex := range c.views {
+		if ex.Slot == v.Slot && ex.Slug == v.Slug {
+			return fmt.Errorf("core: view %s/%q registered twice", v.Slot, v.Slug)
 		}
 	}
-	c.adminViews = append(c.adminViews, v)
+	c.views = append(c.views, v)
 	return nil
 }
 
-// AdminViews returns the registered views in registration order. The host
-// mounts each at /admin/p/<slug> (+ actions) after Boot and builds its admin
-// nav from the list.
-func (c *Core) AdminViews() []AdminView {
+// Views returns the registered views for one slot, in registration order.
+func (c *Core) Views(slot ViewSlot) []View {
 	c.viewMu.Lock()
 	defer c.viewMu.Unlock()
-	out := make([]AdminView, len(c.adminViews))
-	copy(out, c.adminViews)
+	var out []View
+	for _, v := range c.views {
+		if v.Slot == slot {
+			out = append(out, v)
+		}
+	}
 	return out
+}
+
+// ── subject plumbing for user.* slots ───────────────────────────────
+
+const ctxViewSubject = "loon.view.subject"
+
+// SetViewSubject stores the profile-owner's user id before rendering user.*
+// views. Hosts call this in their profile handler.
+func SetViewSubject(c *gin.Context, userID int64) { c.Set(ctxViewSubject, userID) }
+
+// ViewSubject returns the user id whose profile is being rendered. Plugins
+// call this inside a user.widget / user.tab Render.
+func ViewSubject(c *gin.Context) (int64, bool) {
+	v, ok := c.Get(ctxViewSubject)
+	if !ok {
+		return 0, false
+	}
+	id, ok := v.(int64)
+	return id, ok
 }
