@@ -65,9 +65,29 @@ type View struct {
 	Public  bool
 	MinRole Role
 
+	// Nav is the plugin's SUGGESTION for where the view's link appears (the
+	// WordPress/Drupal pattern: code declares defaults; a host — or a future
+	// admin nav editor — may override). Hosts build their nav structure once
+	// at boot and only role-filter per request, so this costs nothing hot.
+	Nav NavHint
+
 	Render  func(c *gin.Context) (template.HTML, error)
 	Actions map[string]func(c *gin.Context) (template.HTML, error)
 }
+
+// NavHint suggests nav placement for page-type views.
+type NavHint struct {
+	// Menu: "" = the host's default menu for the slot; NavHidden = mounted
+	// but not listed (reachable by URL / in-page links only).
+	Menu string
+	// Group labels a dropdown; views sharing a Group collapse under it.
+	Group string
+	// Weight orders links (lower first; ties keep registration order).
+	Weight int
+}
+
+// NavHidden hides a view from nav menus without unmounting it.
+const NavHidden = "none"
 
 // AllowsAnon reports whether anonymous viewers may see the view.
 func (v View) AllowsAnon() bool { return v.Public }
