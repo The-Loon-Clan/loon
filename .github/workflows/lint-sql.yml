@@ -1,0 +1,12 @@
+name: lint-sql
+on: [push, pull_request]
+jobs:
+  sql:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: SQL string-building lint
+        run: go run ./scripts/lint-sql ./...
