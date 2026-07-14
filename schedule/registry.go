@@ -153,6 +153,18 @@ var OffPeakGate = func() bool { return true }
 // activity into their structured logger / stdout.
 var LogSink func(jobName, line string)
 
+// RemoteTrigger, when installed, is called by TriggerJob for a job that has NO
+// local trigger — i.e. a MarkRemote stub registered in a web process for its
+// config, whose run loop lives on a worker. It hands the "run now" to a
+// cross-process queue (a DB table the worker drains), returning an error only if
+// the request couldn't be enqueued; nil means "queued". Defaults to nil (no
+// remote path — TriggerJob just returns false for a triggerless job, as before).
+//
+// Install it ONLY in the web/coordinator process, and run the queue drainer
+// (which calls TriggerJob on the LOCAL, real-trigger job) ONLY in the worker —
+// never both in one process, or a triggerless job would re-enqueue itself.
+var RemoteTrigger func(jobName string) error
+
 // RegisterJob registers a periodic job on r.
 func (r *Registry) RegisterJob(name, description string) *JobInfo {
 	j := &JobInfo{Name: name, Description: description, Kind: JobKindJob, Status: "idle", reg: r}
@@ -490,11 +502,17 @@ func (r *Registry) TriggerJob(name string) bool {
 	status := found.Status
 	r.mu.RUnlock()
 
-	if fn == nil || status == "running" {
-		return false
+	if fn != nil && status != "running" {
+		fn()
+		return true
 	}
-	fn()
-	return true
+	// No local trigger: this is a MarkRemote stub (its run loop lives on another
+	// process). Hand the run to the cross-process queue if the host installed
+	// one — the worker drains it and calls TriggerJob on the real job.
+	if fn == nil && RemoteTrigger != nil {
+		return RemoteTrigger(name) == nil
+	}
+	return false
 }
 
 func TriggerJob(name string) bool { return Default.TriggerJob(name) }
