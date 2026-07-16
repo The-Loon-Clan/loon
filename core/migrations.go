@@ -30,10 +30,43 @@ import (
 // Returning an error aborts boot — half-applied plugin
 // migrations would leave the schema in a wedged state that's
 // hard to recover from.
+// pluginMigrationLockID namespaces the advisory lock that serializes plugin
+// migrators. Distinct from any lock the host takes for its own migrations: the
+// two run back-to-back at boot and must not be able to wait on each other.
+const pluginMigrationLockID = 6274_0716
+
 func RunPluginMigrations(ctx context.Context, db *sqlx.DB) error {
 	if db == nil {
 		return fmt.Errorf("core: RunPluginMigrations called with nil db")
 	}
+
+	// Serialize migrators across processes.
+	//
+	// Every process in a deployment (web, worker, api, ...) boots this. The
+	// loop below is check-then-insert, so on a fresh migration each one sees
+	// isApplied=false, each applies the file, and each races to record it. The
+	// per-migration transaction means the loser's DDL rolls back correctly —
+	// but its INSERT still fails on the (owner, filename) primary key, which
+	// aborts boot by design. The result is that every process except one
+	// crash-loops on a schema that is actually fine.
+	//
+	// The lock is held on one pinned connection because advisory locks are
+	// session scoped: acquired from the pool, the paired unlock could land on a
+	// different connection and strand the lock for the pool's lifetime.
+	conn, err := db.Connx(ctx)
+	if err != nil {
+		return fmt.Errorf("core: acquire migration lock connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, pluginMigrationLockID); err != nil {
+		return fmt.Errorf("core: take plugin migration lock: %w", err)
+	}
+	defer func() {
+		// Best-effort: Close() releases it regardless, and an unlock error must
+		// not mask the migration error we are actually returning.
+		_, _ = conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, pluginMigrationLockID)
+	}()
+
 	if _, err := db.ExecContext(ctx, `
 		CREATE SCHEMA IF NOT EXISTS core;
 		CREATE TABLE IF NOT EXISTS core.plugin_migrations (
@@ -109,8 +142,12 @@ func applyPluginMigrations(ctx context.Context, db *sqlx.DB, owner string, fs em
 			_ = tx.Rollback()
 			return fmt.Errorf("apply %s/%s: %w", owner, name, err)
 		}
+		// ON CONFLICT because the advisory lock in RunPluginMigrations is the
+		// real guarantee; this keeps a caller that somehow reaches the loop
+		// without it from aborting boot over bookkeeping for applied work.
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO core.plugin_migrations(owner, filename) VALUES ($1, $2)`,
+			`INSERT INTO core.plugin_migrations(owner, filename) VALUES ($1, $2)
+			 ON CONFLICT (owner, filename) DO NOTHING`,
 			owner, name,
 		); err != nil {
 			_ = tx.Rollback()
