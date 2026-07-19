@@ -39,5 +39,5 @@ interfaces at its composition root.
 Production-proven: loon runs behind a full content site (~15 plugins)
 and powers the public `loon-demo-site` skeleton, which doubles as
 living documentation. Consumers pin it via a sibling-checkout
-`replace github.com/ameNZB/loon => ../loon` (or `../../loon`). Tagged
+`replace github.com/the-loon-clan/loon => ../loon` (or `../../loon`). Tagged
 releases will follow.

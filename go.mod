@@ -1,4 +1,4 @@
-module github.com/ameNZB/loon
+module github.com/the-loon-clan/loon
 
 go 1.26.4
 

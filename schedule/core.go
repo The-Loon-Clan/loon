@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/ameNZB/loon/core"
+	"github.com/the-loon-clan/loon/core"
 )
 
 // CoreScheduler adapts a Registry onto core.SchedulerService — the

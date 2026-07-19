@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ameNZB/loon/httpclient"
+	"github.com/the-loon-clan/loon/httpclient"
 )
 
 // HTTPClientService is the SSRF-safe outbound HTTP factory
