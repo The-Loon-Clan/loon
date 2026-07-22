@@ -460,3 +460,82 @@ func TestIsConnLimit(t *testing.T) {
 		}
 	}
 }
+
+// TestPoolTryDoBusy is the property background work depends on: when every
+// connection is leased, TryDo gives up immediately instead of queueing. Do
+// blocks there by design; a health sweep that blocked would starve the crawler.
+func TestPoolTryDoBusy(t *testing.T) {
+	s := newFakeServer(t, nil)
+	const size = 2
+	p := testPool(t, s, size, nil)
+
+	held := make(chan struct{}) // closed to release the holders
+	inUse := make(chan struct{}, size)
+	for i := 0; i < size; i++ {
+		go func() {
+			_ = p.Do(context.Background(), func(c *Conn) error {
+				inUse <- struct{}{}
+				<-held
+				return nil
+			})
+		}()
+	}
+	for i := 0; i < size; i++ {
+		select {
+		case <-inUse:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for connections to be leased")
+		}
+	}
+
+	// Every connection is now held. TryDo must return promptly, not block.
+	done := make(chan error, 1)
+	go func() {
+		done <- p.TryDo(context.Background(), func(c *Conn) error {
+			t.Error("callback ran even though every connection was busy")
+			return nil
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != ErrPoolBusy {
+			t.Fatalf("TryDo = %v, want ErrPoolBusy", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("TryDo blocked while all connections were busy — it must not")
+	}
+
+	close(held)
+
+	// Once they are back, TryDo succeeds.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		err := p.TryDo(context.Background(), func(c *Conn) error {
+			_, _, _, err := c.Group("alt.test")
+			return err
+		})
+		if err == nil {
+			break
+		}
+		if err != ErrPoolBusy {
+			t.Fatalf("TryDo after release = %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("TryDo never recovered after the connections were released")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestPoolTryDoDistinguishesEmptyFromBusy: "nothing to use" and "everything in
+// use" are different conditions — the caller retries one and not the other.
+func TestPoolTryDoDistinguishesEmptyFromBusy(t *testing.T) {
+	s := newFakeServer(t, nil)
+	p := testPool(t, s, 1, nil)
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.TryDo(context.Background(), func(c *Conn) error { return nil }); err != ErrPoolEmpty {
+		t.Errorf("TryDo on a closed pool = %v, want ErrPoolEmpty", err)
+	}
+}

@@ -106,6 +106,10 @@ type PoolStats struct {
 // never opened, every slot is dead, or it has been closed).
 var ErrPoolEmpty = errors.New("nntp: no usable connection in pool")
 
+// ErrPoolBusy is returned by TryDo when the pool is healthy but every
+// connection is currently leased. It means "try later", not "broken".
+var ErrPoolBusy = errors.New("nntp: all connections busy")
+
 // NewPool returns an unopened pool. Call Open to dial.
 func NewPool(cfg PoolConfig) *Pool {
 	cfg.applyDefaults()
@@ -160,6 +164,36 @@ func (p *Pool) Do(ctx context.Context, fn func(*Conn) error) error {
 	if !ok {
 		return ErrPoolEmpty
 	}
+	return p.run(lc, idx, fn)
+}
+
+// TryDo is Do without the blocking fallback: when every connection is already
+// leased it gives up immediately with ErrPoolBusy instead of queueing.
+//
+// This is what BACKGROUND work should use. Health checking, for example, walks
+// the whole archive and would otherwise sit in the blocking fallback holding a
+// connection the crawler wants — starving ingest to do bookkeeping. With TryDo
+// it only ever runs on genuinely idle connections and backs off the moment the
+// crawler needs them.
+func (p *Pool) TryDo(ctx context.Context, fn func(*Conn) error) error {
+	lc, idx, ok := p.tryAcquire()
+	if !ok {
+		// Distinguish "nothing to use" from "everything in use" — the caller
+		// should retry the second but not the first.
+		p.mu.RLock()
+		n := len(p.conns)
+		p.mu.RUnlock()
+		if n == 0 {
+			return ErrPoolEmpty
+		}
+		return ErrPoolBusy
+	}
+	return p.run(lc, idx, fn)
+}
+
+// run applies the operation deadline, invokes fn, and discards the connection if
+// it errored. The caller holds lc.mu; run releases it.
+func (p *Pool) run(lc *lockedConn, idx int, fn func(*Conn) error) error {
 	// The lease is held for the whole callback; release before any parsing or
 	// database work so the connection goes back into rotation promptly.
 	defer lc.mu.Unlock()
@@ -170,8 +204,7 @@ func (p *Pool) Do(ctx context.Context, fn func(*Conn) error) error {
 	if p.cfg.OpTimeout > 0 {
 		_ = lc.conn.SetDeadline(time.Now().Add(p.cfg.OpTimeout))
 	}
-	err := fn(lc.conn)
-	if err != nil {
+	if err := fn(lc.conn); err != nil {
 		p.discardLocked(lc, idx)
 		return err
 	}
@@ -181,20 +214,11 @@ func (p *Pool) Do(ctx context.Context, fn func(*Conn) error) error {
 	return nil
 }
 
-// acquire returns a locked slot. It sweeps round-robin with TryLock to skip busy
-// connections, then falls back to blocking on one so callers queue instead of
-// spinning. The returned slot's mutex is held by the caller.
-func (p *Pool) acquire() (*lockedConn, int, bool) {
-	p.mu.RLock()
-	n := len(p.conns)
-	if n == 0 {
-		p.mu.RUnlock()
-		return nil, 0, false
-	}
-	snapshot := make([]*lockedConn, n)
-	copy(snapshot, p.conns)
-	p.mu.RUnlock()
-
+// tryAcquire sweeps round-robin with TryLock and never blocks. Returns a locked
+// slot, or ok=false when every connection is busy or dead.
+func (p *Pool) tryAcquire() (*lockedConn, int, bool) {
+	snapshot := p.snapshot()
+	n := len(snapshot)
 	for attempt := 0; attempt < n; attempt++ {
 		i := int(atomic.AddUint64(&p.idx, 1) % uint64(n))
 		c := snapshot[i]
@@ -207,8 +231,21 @@ func (p *Pool) acquire() (*lockedConn, int, bool) {
 		}
 		return c, i, true
 	}
+	return nil, 0, false
+}
 
-	// Everything is busy: block on one. This is the intended backpressure.
+// acquire returns a locked slot, waiting if it must. It sweeps with TryLock
+// first to skip busy connections, then blocks on one so callers queue instead of
+// spinning — that queueing is the pool's backpressure.
+func (p *Pool) acquire() (*lockedConn, int, bool) {
+	if lc, i, ok := p.tryAcquire(); ok {
+		return lc, i, true
+	}
+	snapshot := p.snapshot()
+	n := len(snapshot)
+	if n == 0 {
+		return nil, 0, false
+	}
 	i := int(atomic.AddUint64(&p.idx, 1) % uint64(n))
 	c := snapshot[i]
 	c.mu.Lock()
@@ -217,6 +254,15 @@ func (p *Pool) acquire() (*lockedConn, int, bool) {
 		return nil, 0, false
 	}
 	return c, i, true
+}
+
+// snapshot copies the slot slice so lease attempts don't hold the pool lock.
+func (p *Pool) snapshot() []*lockedConn {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]*lockedConn, len(p.conns))
+	copy(out, p.conns)
+	return out
 }
 
 // discardLocked tears down a connection that errored. The caller holds lc.mu.
