@@ -85,6 +85,15 @@ type Core struct {
 	// pkg/services.LogServiceError or web/handlers.JSONInternalError.
 	Errors ErrorReporter
 
+	// Redis is a shared Redis client for plugins that need one (e.g.
+	// the usenet redis staging backend). It is the ONE OPTIONAL
+	// subsystem: unlike every field above, a host may run without
+	// Redis, in which case this is nil. New does NOT require it.
+	// Plugins MUST nil-check — `if c.Redis == nil { ... }` — and
+	// degrade (the usenet plugin refuses `staging: redis` when it's
+	// absent rather than silently falling back). See redis.go.
+	Redis RedisService
+
 	// Process identifies which process kind this Core was built
 	// for: "web", "worker", or "all" (single-process mode). Boot
 	// uses it to filter plugins (Metadata.Processes); dual-

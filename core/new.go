@@ -32,6 +32,11 @@ type Deps struct {
 	Points        PointsService
 	HTTPClient    HTTPClientService
 	Errors        ErrorReporter
+
+	// Redis is the sole OPTIONAL dep: leave it nil on a host without
+	// Redis. New does not validate it (see Core.Redis). Set it via
+	// core.NewRedis(client) when the host runs Redis.
+	Redis RedisService
 }
 
 // New validates d and assembles the Core mediator. It fails loud:
@@ -58,6 +63,7 @@ func New(d Deps) (*Core, error) {
 	req("Points", d.Points != nil)
 	req("HTTPClient", d.HTTPClient != nil)
 	req("Errors", d.Errors != nil)
+	// Redis is intentionally NOT required — it is optional infrastructure.
 	switch d.Process {
 	case "web", "worker", "all", "api":
 	default:
@@ -80,5 +86,6 @@ func New(d Deps) (*Core, error) {
 		Points:        d.Points,
 		HTTPClient:    d.HTTPClient,
 		Errors:        d.Errors,
+		Redis:         d.Redis, // optional — may be nil
 	}, nil
 }
