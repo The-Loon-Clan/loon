@@ -205,17 +205,26 @@ func maybeId(cmd, id string) string {
 }
 
 func newConn(c net.Conn) (res *Conn, err error) {
-	res = &Conn{
+	res, _, err = newConnGreeting(c)
+	return
+}
+
+// newConnGreeting builds the Conn and hands back the server's greeting line so
+// the caller can inspect it. This matters for pooling: a server that is at the
+// account's concurrent-connection limit accepts the TCP connection and then
+// says so in the greeting (502), so a dial that ignores the greeting looks
+// successful and only fails on the first real command.
+func newConnGreeting(c net.Conn) (*Conn, string, error) {
+	res := &Conn{
 		conn:    c,
 		netConn: c,
 		r:       bufio.NewReaderSize(c, 1<<20),
 	}
-
-	if _, err = res.r.ReadString('\n'); err != nil {
-		return
+	line, err := res.r.ReadString('\n')
+	if err != nil {
+		return nil, "", err
 	}
-
-	return
+	return res, strings.TrimRight(line, "\r\n"), nil
 }
 
 // Dial connects to an NNTP server.
