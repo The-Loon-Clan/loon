@@ -168,6 +168,13 @@ var RemoteTrigger func(jobName string) error
 // RegisterJob registers a periodic job on r.
 func (r *Registry) RegisterJob(name, description string) *JobInfo {
 	j := &JobInfo{Name: name, Description: description, Kind: JobKindJob, Status: "idle", reg: r}
+	// Restore a persisted pause before the first tick, so "paused" survives a
+	// restart instead of silently resuming on every deploy.
+	if LoadPaused != nil && LoadPaused(name) {
+		j.Paused = true
+		j.Status = "paused"
+		j.Progress = "Paused by admin"
+	}
 	r.mu.Lock()
 	r.jobs = append(r.jobs, j)
 	r.mu.Unlock()
@@ -517,6 +524,16 @@ func (r *Registry) TriggerJob(name string) bool {
 
 func TriggerJob(name string) bool { return Default.TriggerJob(name) }
 
+// LoadPaused / SavePaused persist the paused flag across restarts. Without
+// them a pause is in-memory only — the next deploy silently resumes the job,
+// which is exactly wrong when an operator paused it to keep it off (e.g. a
+// legacy worker being replaced during a cutover). A host installs both next
+// to IntervalOverride/PanicSink; nil keeps the historical in-memory behavior.
+var (
+	LoadPaused func(jobName string) bool
+	SavePaused func(jobName string, paused bool)
+)
+
 // PauseJob sets the Paused flag on a job by name. Returns false if not found.
 func (r *Registry) PauseJob(name string) bool {
 	r.mu.Lock()
@@ -526,6 +543,9 @@ func (r *Registry) PauseJob(name string) bool {
 			j.Paused = true
 			j.Status = "paused"
 			j.Progress = "Paused by admin"
+			if SavePaused != nil {
+				SavePaused(name, true)
+			}
 			return true
 		}
 	}
@@ -544,6 +564,9 @@ func (r *Registry) ResumeJob(name string) bool {
 			if j.Status == "paused" {
 				j.Status = "idle"
 				j.Progress = ""
+			}
+			if SavePaused != nil {
+				SavePaused(name, false)
 			}
 			return true
 		}

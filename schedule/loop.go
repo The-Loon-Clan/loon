@@ -60,7 +60,12 @@ func ServiceLoop(ctx context.Context, job *JobInfo, initialDelay, defaultInterva
 		return
 	}
 	for {
-		if job.OffPeak && !OffPeakGate() {
+		if job.IsPaused() {
+			// Central pause gate: services double-check IsPaused inside long
+			// ticks, but skipping here makes the /admin jobs Pause button work
+			// for EVERY loop-driven job, not just the ones that remembered to.
+			job.Log("Skipped: paused by admin")
+		} else if job.OffPeak && !OffPeakGate() {
 			job.Log("Skipped: site is busy (off-peak gate)")
 		} else {
 			runTickProtected(ctx, job, tickFn, h.OnPanic)
