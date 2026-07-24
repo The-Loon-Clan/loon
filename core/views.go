@@ -57,6 +57,13 @@ type View struct {
 	Slot   ViewSlot
 	Anchor string // slot-specific attachment point (SlotJobsWidget: job-group name)
 
+	// Description is an optional one-liner for host navigation surfaces — an
+	// admin-hub card subtitle, a nav tooltip. Hosts that render plugin pages
+	// dynamically (a card per registered view) read it so a plugin never needs
+	// a hand-edited entry in a host template. Empty is fine: hosts render the
+	// title alone.
+	Description string
+
 	// Visibility for site.* and user.* slots (admin.* slots additionally sit
 	// behind the host's admin gate regardless of these):
 	//   Public true          → anonymous viewers allowed
