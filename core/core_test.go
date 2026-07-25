@@ -22,6 +22,7 @@ func fullDeps() Deps {
 		Config:        NewConfig(nil),
 		Notifications: NewNotifications(NotificationsAdapter{}),
 		Points:        NewPoints(PointsAdapter{}),
+		Entitlements:  NewEntitlements(EntitlementsConfig{Store: NewMemEntitlementStore()}),
 		HTTPClient:    NewHTTPClient(),
 		Errors:        NewErrorReporter(ErrorAdapter{}),
 	}
@@ -46,7 +47,8 @@ func TestNew_ReportsAllMissingDeps(t *testing.T) {
 	// composition root fixes the wiring in one pass.
 	for _, want := range []string{
 		"Users", "Auth", "RBAC", "Storage", "Scheduler", "Router",
-		"Logger", "Config", "Notifications", "Points", "HTTPClient", "Errors",
+		"Logger", "Config", "Notifications", "Points", "Entitlements",
+		"HTTPClient", "Errors",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name missing dep %s", err, want)

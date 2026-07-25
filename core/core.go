@@ -73,6 +73,12 @@ type Core struct {
 	// deduct).
 	Points PointsService
 
+	// Entitlements answers named per-user access questions
+	// (Has/Limit) and takes grants from source plugins
+	// (Grant/Revoke). The fine-grained layer between the Role
+	// ladder and per-feature rules — see entitlements.go.
+	Entitlements EntitlementsService
+
 	// HTTPClient is the SSRF-safe outbound HTTP factory. Raw
 	// &http.Client{} is forbidden in plugin code — every
 	// outbound fetch must come from here so the SSRF guard,

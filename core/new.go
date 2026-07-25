@@ -30,6 +30,7 @@ type Deps struct {
 	Config        ConfigService
 	Notifications NotificationsService
 	Points        PointsService
+	Entitlements  EntitlementsService
 	HTTPClient    HTTPClientService
 	Errors        ErrorReporter
 
@@ -61,6 +62,7 @@ func New(d Deps) (*Core, error) {
 	req("Config", d.Config != nil)
 	req("Notifications", d.Notifications != nil)
 	req("Points", d.Points != nil)
+	req("Entitlements", d.Entitlements != nil)
 	req("HTTPClient", d.HTTPClient != nil)
 	req("Errors", d.Errors != nil)
 	// Redis is intentionally NOT required — it is optional infrastructure.
@@ -84,6 +86,7 @@ func New(d Deps) (*Core, error) {
 		Config:        d.Config,
 		Notifications: d.Notifications,
 		Points:        d.Points,
+		Entitlements:  d.Entitlements,
 		HTTPClient:    d.HTTPClient,
 		Errors:        d.Errors,
 		Redis:         d.Redis, // optional — may be nil
