@@ -1,6 +1,10 @@
 package core
 
-import "github.com/gin-gonic/gin"
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
 
 // AuthService gives plugins reusable middleware + the
 // current-user accessor. CurrentUser returns (nil, false) on
@@ -67,12 +71,25 @@ type AuthAdapter struct {
 }
 
 // NewAuth constructs an AuthService from the supplied adapter.
-// Each nil callback falls back to a permissive empty chain (so a
-// partial wiring still compiles and runs) — production callers
-// MUST supply all three.
+// The identity-loading callbacks (Optional/Authenticate) fall back to a
+// permissive empty chain when nil — pages render anonymous, degraded but
+// harmless. The GATES (RequireUser/RequireRole) fail CLOSED: a nil callback
+// yields a chain that aborts every request with 503, because "auth not
+// configured" silently meaning "no gate" turns one misplaced Processes edit
+// into anonymous admin routes with zero boot-time signal.
 func NewAuth(a AuthAdapter) AuthService { return &authAdapter{a: a} }
 
 type authAdapter struct{ a AuthAdapter }
+
+// unwiredGate is the fail-closed chain for a role gate requested from a Core
+// whose AuthAdapter never wired one. 503 (not 401): the deployment is
+// misconfigured — no login could ever succeed here.
+func unwiredGate() gin.HandlersChain {
+	return gin.HandlersChain{func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable,
+			gin.H{"ok": false, "error": "auth gate not configured on this process"})
+	}}
+}
 
 func (h *authAdapter) Optional() gin.HandlersChain {
 	if h.a.OptionalFn == nil {
@@ -90,14 +107,14 @@ func (h *authAdapter) Authenticate() gin.HandlersChain {
 
 func (h *authAdapter) RequireUser(minRole Role) gin.HandlersChain {
 	if h.a.RequireUserFn == nil {
-		return gin.HandlersChain{}
+		return unwiredGate()
 	}
 	return h.a.RequireUserFn(minRole)
 }
 
 func (h *authAdapter) RequireRole(role Role) gin.HandlersChain {
 	if h.a.RequireRoleFn == nil {
-		return gin.HandlersChain{}
+		return unwiredGate()
 	}
 	return h.a.RequireRoleFn(role)
 }
