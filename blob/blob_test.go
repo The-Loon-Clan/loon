@@ -116,6 +116,10 @@ func TestLocalRejectsHostileNames(t *testing.T) {
 		"/etc/passwd",
 		"a\\b.png",
 		"dir/",
+		"C:foo.png",
+		"x.jpg:evil",
+		"a/\x00b.png",
+		"a/\x1bb.png",
 	}
 	for _, name := range hostile {
 		if _, err := s.Save(ctx, name, []byte("x")); err == nil {

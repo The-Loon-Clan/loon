@@ -134,9 +134,19 @@ func (l *Local) Remove(ctx context.Context, name string) error {
 // that can reach the filesystem from user-influenced code (filenames,
 // route params), so this is the traversal boundary: forward-slash
 // relative paths only, no "..", no absolute paths, no backslashes.
+// ":" is rejected too — on Windows it is a drive prefix or an NTFS
+// alternate-data-stream separator; nothing escapes the root either
+// way, but no legitimate store name contains one. Control characters
+// likewise.
 func cleanName(name string) (string, error) {
-	if name == "" || strings.Contains(name, "\\") || strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
+	if name == "" || strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") ||
+		strings.ContainsAny(name, "\\:") {
 		return "", fmt.Errorf("blob: invalid name %q", name)
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("blob: invalid name %q", name)
+		}
 	}
 	clean := path.Clean(name)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
