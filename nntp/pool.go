@@ -159,12 +159,46 @@ func (p *Pool) Open(ctx context.Context) error {
 // connection is discarded (see the type comment); a caller that wants to keep
 // the connection despite a protocol-level "no" — say a 411 for a missing group
 // — should capture that condition and return nil.
+//
+// A failed acquire reports WHICH failure it was, the same way TryDo does. It
+// used to return ErrPoolEmpty for both, so a pool that was merely saturated
+// logged "no usable connection in pool" — an operator reading that goes looking
+// for a dead provider when the connections exist and are all leased. Prod spent
+// two days on that misreading: 47 of 50 slots open and 6 busy, while the log
+// insisted there were none.
 func (p *Pool) Do(ctx context.Context, fn func(*Conn) error) error {
 	lc, idx, ok := p.acquire()
 	if !ok {
-		return ErrPoolEmpty
+		return p.acquireErr()
 	}
 	return p.run(lc, idx, fn)
+}
+
+// acquireErr distinguishes "nothing to use" from "everything in use". Callers
+// should retry the second and not the first.
+//
+// It counts LIVE connections, not slots. discardLocked nils a slot's conn but
+// leaves the slot in place for TopUp to refill, so len(p.conns) stays at the
+// pool size even when every connection is dead — testing it would report a
+// wholly dead pool as merely "busy" and invite the caller to retry forever.
+func (p *Pool) acquireErr() error {
+	live := 0
+	for _, lc := range p.snapshot() {
+		// A slot we cannot lock is leased, which means it holds a live
+		// connection — busy counts as alive for this purpose.
+		if !lc.mu.TryLock() {
+			live++
+			continue
+		}
+		if lc.conn != nil {
+			live++
+		}
+		lc.mu.Unlock()
+	}
+	if live == 0 {
+		return ErrPoolEmpty
+	}
+	return ErrPoolBusy
 }
 
 // TryDo is Do without the blocking fallback: when every connection is already
@@ -178,15 +212,7 @@ func (p *Pool) Do(ctx context.Context, fn func(*Conn) error) error {
 func (p *Pool) TryDo(ctx context.Context, fn func(*Conn) error) error {
 	lc, idx, ok := p.tryAcquire()
 	if !ok {
-		// Distinguish "nothing to use" from "everything in use" — the caller
-		// should retry the second but not the first.
-		p.mu.RLock()
-		n := len(p.conns)
-		p.mu.RUnlock()
-		if n == 0 {
-			return ErrPoolEmpty
-		}
-		return ErrPoolBusy
+		return p.acquireErr()
 	}
 	return p.run(lc, idx, fn)
 }

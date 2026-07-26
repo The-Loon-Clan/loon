@@ -539,3 +539,61 @@ func TestPoolTryDoDistinguishesEmptyFromBusy(t *testing.T) {
 		t.Errorf("TryDo on a closed pool = %v, want ErrPoolEmpty", err)
 	}
 }
+
+// Do used to report ErrPoolEmpty for BOTH "every slot is dead" and "every slot
+// is leased", which sent operators hunting for a dead provider while the
+// connections were merely all in use. Prod read "no usable connection in pool"
+// for two days against a pool holding 47 of 50 open. These pin the two
+// conditions apart, on the Do path specifically.
+func TestPoolDoDistinguishesBusyFromEmpty(t *testing.T) {
+	const size = 2
+	s := newFakeServer(t, nil)
+	p := testPool(t, s, size, nil)
+
+	held := make(chan struct{})
+	inUse := make(chan struct{}, size)
+	for i := 0; i < size; i++ {
+		go func() {
+			_ = p.Do(context.Background(), func(c *Conn) error {
+				inUse <- struct{}{}
+				<-held
+				return nil
+			})
+		}()
+	}
+	for i := 0; i < size; i++ {
+		select {
+		case <-inUse:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for connections to be leased")
+		}
+	}
+
+	// Saturated, not broken. Do blocks rather than failing, so probe the
+	// classifier directly — that is what the error the caller sees comes from.
+	if err := p.acquireErr(); err != ErrPoolBusy {
+		t.Errorf("acquireErr with every connection leased = %v, want ErrPoolBusy", err)
+	}
+	close(held)
+}
+
+func TestPoolDoReportsEmptyWhenEveryConnectionIsDead(t *testing.T) {
+	s := newFakeServer(t, func(f *fakeServer) { f.failOver = true })
+	p := testPool(t, s, 2, func(c *PoolConfig) { c.TopUpCooldown = time.Hour }) // no auto-refill
+
+	// Kill both connections. discardLocked nils each slot's conn but leaves the
+	// slot in place, so len(p.conns) stays 2 — which is exactly why the
+	// classifier has to count LIVE connections rather than slots.
+	for i := 0; i < 2; i++ {
+		_, _ = fetch(p, "alt.test", 1, 5)
+	}
+	if st := p.Stats(); st.Open != 0 {
+		t.Fatalf("Open = %d, want 0 once both connections are discarded", st.Open)
+	}
+	if err := p.acquireErr(); err != ErrPoolEmpty {
+		t.Errorf("acquireErr with every slot dead = %v, want ErrPoolEmpty", err)
+	}
+	if _, err := fetch(p, "alt.test", 1, 5); err != ErrPoolEmpty {
+		t.Errorf("Do = %v, want ErrPoolEmpty when nothing is usable", err)
+	}
+}
