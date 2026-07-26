@@ -28,10 +28,13 @@ import (
 // fetch goroutines normally outnumber connections, and this is what stops them
 // running away from the server.
 //
-// A connection that returns any error is discarded rather than reused: a failed
-// command can leave an undrained multi-line response in the reader, and the next
-// caller would read that as its own reply. Dead slots are refilled by TopUp,
-// which is rate-limited so a server outage can't spawn unbounded dials.
+// A connection is discarded when the TRANSPORT fails, not when the server says
+// no. The undrained-response hazard is real — a command that dies partway
+// through a multi-line reply leaves bytes the next caller would read as its own
+// — but it cannot arise from a 4xx/5xx status line: those are produced by cmd()
+// before any body begins, so the session is clean and reusable. See
+// reusableAfter. Dead slots are refilled by TopUp, which is rate-limited so a
+// server outage can't spawn unbounded dials.
 type Pool struct {
 	cfg PoolConfig
 
@@ -155,10 +158,10 @@ func (p *Pool) Open(ctx context.Context) error {
 // Do leases one connection, applies OpTimeout, and runs fn against it.
 //
 // fn must not retain the Conn past its return, and must issue GROUP before any
-// command that depends on the selected group. If fn returns an error the
-// connection is discarded (see the type comment); a caller that wants to keep
-// the connection despite a protocol-level "no" — say a 411 for a missing group
-// — should capture that condition and return nil.
+// command that depends on the selected group. Returning a protocol-level "no"
+// — a 411 for a missing group, a 423 for a range past the high-water mark — is
+// fine and costs nothing: the connection survives it. Only a broken transport
+// discards.
 //
 // A failed acquire reports WHICH failure it was, the same way TryDo does. It
 // used to return ErrPoolEmpty for both, so a pool that was merely saturated
@@ -231,7 +234,18 @@ func (p *Pool) run(lc *lockedConn, idx int, fn func(*Conn) error) error {
 		_ = lc.conn.SetDeadline(time.Now().Add(p.cfg.OpTimeout))
 	}
 	if err := fn(lc.conn); err != nil {
-		p.discardLocked(lc, idx)
+		// Only a BROKEN connection gets torn down. A server that answers with
+		// a 4xx/5xx reply is healthy and the session is intact — see
+		// reusableAfter.
+		if !reusableAfter(err) {
+			p.discardLocked(lc, idx)
+		} else if p.cfg.OpTimeout > 0 {
+			// Kept alive, so the deadline set above must not outlive this
+			// call — the next lease would inherit an already-expired one and
+			// fail instantly, which would look exactly like the churn this
+			// avoids.
+			lc.conn.ClearDeadline()
+		}
 		return err
 	}
 	if p.cfg.OpTimeout > 0 {
@@ -441,6 +455,54 @@ func (p *Pool) dial() (*Conn, error) {
 		c.ClearDeadline()
 	}
 	return c, nil
+}
+
+// sessionSafeCodes are NNTP replies that mean "your request was wrong or the
+// thing is not here" — the server processed the command and answered, so the
+// connection is still perfectly usable.
+//
+// A whitelist rather than a blacklist on purpose: an unrecognised code might
+// mean the server is unhappy with the session, and the cost of being wrong in
+// that direction (one extra reconnect) is far lower than the cost of the other
+// (reusing a connection the server is closing).
+var sessionSafeCodes = map[uint]bool{
+	411: true, // no such newsgroup
+	412: true, // no newsgroup selected
+	420: true, // no current article
+	421: true, // no next article
+	422: true, // no previous article
+	423: true, // no such article NUMBER in this group
+	430: true, // no such article
+	500: true, // command not recognized
+	501: true, // command syntax error
+}
+
+// reusableAfter reports whether the connection can serve the next caller after
+// err. It is the difference between "the server said no" and "the socket is
+// gone", and getting it wrong is expensive in a way that hides.
+//
+// run() used to discard on ANY error, which meant an ordinary "423 no such
+// article number" — the reply a crawler gets every time it probes past a
+// group's high-water mark — cost a TLS teardown, a fresh handshake and a
+// re-auth. On a pass that plans ranges optimistically that is not an edge case,
+// it is the steady state: the pool churns connections continuously while
+// reporting healthy counts, and the provider sees a reconnect storm rather than
+// the modest connection count that was actually configured.
+//
+// Transport failures (timeouts, resets, EOF) and the codes that mean the server
+// is closing on us are exactly the ones that must still discard.
+func reusableAfter(err error) bool {
+	if err == nil {
+		return true
+	}
+	var e Error
+	if !errors.As(err, &e) {
+		return false // not a server reply at all — transport, or a parse failure
+	}
+	if isConnLimit(err) {
+		return false // 482/502: the server is at its limit and closing
+	}
+	return sessionSafeCodes[e.Code]
 }
 
 // isConnLimit reports whether err is the server refusing on concurrent-connection

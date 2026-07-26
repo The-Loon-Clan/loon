@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -595,5 +596,89 @@ func TestPoolDoReportsEmptyWhenEveryConnectionIsDead(t *testing.T) {
 	}
 	if _, err := fetch(p, "alt.test", 1, 5); err != ErrPoolEmpty {
 		t.Errorf("Do = %v, want ErrPoolEmpty when nothing is usable", err)
+	}
+}
+
+// TestReusableAfter is the classifier the pool's churn behaviour rests on.
+//
+// run() used to discard on ANY error, so an ordinary "423 no such article
+// number" — what a crawler gets every time it probes past a group's
+// high-water mark — cost a TLS teardown plus a fresh handshake and re-auth.
+// That is not an edge case on a pass that plans ranges optimistically; it is
+// the steady state, and it makes a modestly-sized pool look like a reconnect
+// storm from the provider's side while every local counter reads healthy.
+func TestReusableAfter(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, true},
+		// The whole point: these are answers, not failures.
+		{"411 no such group", Error{Code: 411, Msg: "no such newsgroup"}, true},
+		{"423 range past high water", Error{Code: 423, Msg: "no such article number"}, true},
+		{"430 no such article", Error{Code: 430, Msg: "no such article"}, true},
+		{"500 bad command", Error{Code: 500, Msg: "command not recognized"}, true},
+		// The server is closing on us — reusing these is the bug the old
+		// behaviour accidentally avoided, so they must still discard.
+		{"482 too many connections", Error{Code: 482, Msg: "too many connections"}, false},
+		{"502 access denied", Error{Code: 502, Msg: "access denied"}, false},
+		{"400 service unavailable", Error{Code: 400, Msg: "service temporarily unavailable"}, false},
+		// Transport: the socket is gone or the reply was unreadable. A body may
+		// be half-consumed, which is the undrained-response hazard.
+		{"timeout", fmt.Errorf("read tcp: i/o timeout"), false},
+		{"eof", io.EOF, false},
+		{"protocol garble", ProtocolError("short response: xx"), false},
+		// An unknown status code is treated as unsafe: one needless reconnect
+		// costs far less than reusing a session the server is tearing down.
+		{"unknown code", Error{Code: 451, Msg: "who knows"}, false},
+	}
+	for _, tc := range cases {
+		if got := reusableAfter(tc.err); got != tc.want {
+			t.Errorf("reusableAfter(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The behavioural half: a protocol "no" must leave the pool intact, so the
+// next call reuses the same connection instead of redialing.
+func TestPoolKeepsConnectionAfterProtocolError(t *testing.T) {
+	s := newFakeServer(t, nil)
+	p := testPool(t, s, 1, nil)
+
+	before := p.Stats().Resets
+	err := p.Do(context.Background(), func(c *Conn) error {
+		return Error{Code: 423, Msg: "no such article number"}
+	})
+	if err == nil {
+		t.Fatal("the error was swallowed; the caller must still see it")
+	}
+	if got := p.Stats().Resets; got != before {
+		t.Errorf("resets went %d -> %d; a 423 must not tear down the connection", before, got)
+	}
+	if open := p.Stats().Open; open != 1 {
+		t.Errorf("open = %d, want 1 — the connection should still be there", open)
+	}
+	// And it is genuinely usable, not just counted.
+	if err := p.Do(context.Background(), func(c *Conn) error { return nil }); err != nil {
+		t.Errorf("the kept connection failed on the next call: %v", err)
+	}
+}
+
+// The other half: a transport failure must still discard, or the undrained
+// multi-line response the old comment warned about reaches the next caller.
+func TestPoolDiscardsConnectionAfterTransportError(t *testing.T) {
+	s := newFakeServer(t, nil)
+	p := testPool(t, s, 1, nil)
+
+	before := p.Stats().Resets
+	_ = p.Do(context.Background(), func(c *Conn) error {
+		return fmt.Errorf("read tcp 10.0.0.1:119: i/o timeout")
+	})
+	if got := p.Stats().Resets; got != before+1 {
+		t.Errorf("resets went %d -> %d, want +1 — a broken socket must be discarded", before, got)
+	}
+	if open := p.Stats().Open; open != 0 {
+		t.Errorf("open = %d, want 0 — the dead slot awaits TopUp", open)
 	}
 }
