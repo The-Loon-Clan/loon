@@ -46,6 +46,13 @@ type Pool struct {
 	retryAfter time.Time // TopUp cooldown after a rejected dial
 
 	resets atomic.Int64 // connections discarded after an error
+
+	// stop shuts down the keepalive goroutine. Closed by Close, at most once —
+	// a pool may legitimately be closed twice (fleet churn plus shutdown) and
+	// closing a closed channel panics.
+	stop     chan struct{}
+	stopOnce sync.Once
+	keepWG   sync.WaitGroup
 }
 
 // PoolConfig describes the server to connect to and how the pool behaves.
@@ -64,6 +71,22 @@ type PoolConfig struct {
 	// DialTimeout bounds the TCP/TLS handshake AND the server greeting. Without
 	// it a black-holed server blocks the dialing goroutine forever.
 	DialTimeout time.Duration
+
+	// KeepaliveInterval is how often idle connections are probed. Zero
+	// disables keepalive entirely, which is the old behaviour.
+	//
+	// Usenet providers reap idle connections aggressively, and a crawl pass
+	// leaves most of the pool untouched between runs — so without this the
+	// normal steady state is a pool full of connections the server has already
+	// closed, discovered only when the next pass tries to use them. Prod saw
+	// ~2,400 "read tcp ... connection reset" per hour and 46 resets per pass
+	// from exactly this.
+	KeepaliveInterval time.Duration
+
+	// KeepaliveIdle is how long a connection must have gone unused before it
+	// is worth probing. Real traffic is the best keepalive there is, so a busy
+	// pool should generate no probes at all.
+	KeepaliveIdle time.Duration
 
 	// OpTimeout is the deadline applied around one Do callback (the whole
 	// GROUP+OVER exchange, say). Zero disables it.
@@ -95,6 +118,9 @@ func (c *PoolConfig) applyDefaults() {
 type lockedConn struct {
 	mu   sync.Mutex
 	conn *Conn
+	// lastUsed is when this slot last finished a lease or a probe. Guarded by
+	// mu, like conn.
+	lastUsed time.Time
 }
 
 // PoolStats is a point-in-time snapshot for admin/diagnostic surfaces.
@@ -141,7 +167,7 @@ func (p *Pool) Open(ctx context.Context) error {
 			}
 			continue
 		}
-		opened = append(opened, &lockedConn{conn: c})
+		opened = append(opened, &lockedConn{conn: c, lastUsed: time.Now()})
 	}
 	if len(opened) == 0 {
 		if firstErr == nil {
@@ -152,7 +178,78 @@ func (p *Pool) Open(ctx context.Context) error {
 	p.mu.Lock()
 	p.conns = append(p.conns, opened...)
 	p.mu.Unlock()
+	p.startKeepalive()
 	return nil
+}
+
+// startKeepalive launches the idle-probe loop, at most once per pool.
+func (p *Pool) startKeepalive() {
+	if p.cfg.KeepaliveInterval <= 0 {
+		return
+	}
+	p.mu.Lock()
+	if p.stop != nil {
+		p.mu.Unlock()
+		return // already running: Open may be called again after a TopUp
+	}
+	p.stop = make(chan struct{})
+	stop := p.stop
+	p.mu.Unlock()
+
+	p.keepWG.Add(1)
+	go func() {
+		defer p.keepWG.Done()
+		t := time.NewTicker(p.cfg.KeepaliveInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case now := <-t.C:
+				p.keepaliveOnce(now)
+			}
+		}
+	}()
+}
+
+// keepaliveOnce probes every slot that has been idle too long, discarding any
+// whose connection the server has already closed.
+//
+// TryLock, never Lock: a busy slot is doing real work, which is a better
+// keepalive than a probe and must not be delayed by one. A slot that is dead
+// (conn == nil) is left for TopUp — dialling is TopUp's job, and doing it here
+// would duplicate its cooldown and its connection-limit backoff.
+func (p *Pool) keepaliveOnce(now time.Time) {
+	idle := p.cfg.KeepaliveIdle
+	if idle <= 0 {
+		idle = p.cfg.KeepaliveInterval
+	}
+	for i, lc := range p.snapshot() {
+		if !lc.mu.TryLock() {
+			continue
+		}
+		if lc.conn == nil || now.Sub(lc.lastUsed) < idle {
+			lc.mu.Unlock()
+			continue
+		}
+		if p.cfg.OpTimeout > 0 {
+			_ = lc.conn.SetDeadline(now.Add(p.cfg.OpTimeout))
+		}
+		_, err := lc.conn.Date()
+		if err != nil {
+			// The probe is how we find out the server already hung up. That is
+			// the point: discard it here, on a background goroutine, so TopUp
+			// replaces it before a crawl pass ever leases it.
+			p.discardLocked(lc, i)
+			lc.mu.Unlock()
+			continue
+		}
+		if p.cfg.OpTimeout > 0 {
+			lc.conn.ClearDeadline()
+		}
+		lc.lastUsed = now
+		lc.mu.Unlock()
+	}
 }
 
 // Do leases one connection, applies OpTimeout, and runs fn against it.
@@ -224,8 +321,13 @@ func (p *Pool) TryDo(ctx context.Context, fn func(*Conn) error) error {
 // it errored. The caller holds lc.mu; run releases it.
 func (p *Pool) run(lc *lockedConn, idx int, fn func(*Conn) error) error {
 	// The lease is held for the whole callback; release before any parsing or
-	// database work so the connection goes back into rotation promptly.
-	defer lc.mu.Unlock()
+	// database work so the connection goes back into rotation promptly. The
+	// stamp is what keeps keepalive off busy slots — traffic is a better
+	// keepalive than any probe.
+	defer func() {
+		lc.lastUsed = time.Now()
+		lc.mu.Unlock()
+	}()
 
 	if lc.conn == nil {
 		return ErrPoolEmpty
@@ -385,6 +487,7 @@ func (p *Pool) TopUp(ctx context.Context) {
 			return
 		}
 		lc.conn = c
+		lc.lastUsed = time.Now()
 		lc.mu.Unlock()
 	}
 
@@ -405,7 +508,7 @@ func (p *Pool) TopUp(ctx context.Context) {
 			return
 		}
 		p.mu.Lock()
-		p.conns = append(p.conns, &lockedConn{conn: c})
+		p.conns = append(p.conns, &lockedConn{conn: c, lastUsed: time.Now()})
 		p.mu.Unlock()
 	}
 }
@@ -436,6 +539,17 @@ func (p *Pool) Stats() PoolStats {
 // Close quits every connection and empties the pool. In-flight leases are waited
 // for (each slot's mutex is taken), so Close does not race a live command.
 func (p *Pool) Close() error {
+	// Stop probing BEFORE tearing the slots down, and wait for the goroutine
+	// to actually be gone: a probe in flight against a connection Close is
+	// quitting would race on lc.conn.
+	p.mu.Lock()
+	stop := p.stop
+	p.mu.Unlock()
+	if stop != nil {
+		p.stopOnce.Do(func() { close(stop) })
+		p.keepWG.Wait()
+	}
+
 	p.mu.Lock()
 	slots := p.conns
 	p.conns = nil
