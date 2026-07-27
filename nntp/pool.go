@@ -286,14 +286,40 @@ func (p *Pool) acquire() (*lockedConn, int, bool) {
 	if n == 0 {
 		return nil, 0, false
 	}
-	i := int(atomic.AddUint64(&p.idx, 1) % uint64(n))
-	c := snapshot[i]
-	c.mu.Lock()
-	if c.conn == nil {
-		c.mu.Unlock()
-		return nil, 0, false
+	// Blocking fallback. Walk up to n slots rather than committing to the
+	// first one the round-robin picks.
+	//
+	// tryAcquire failing means every slot is either LEASED or DEAD, and the
+	// two need opposite handling: block on a leased one, skip a dead one. The
+	// single-slot version could not tell them apart until after it had already
+	// chosen, so landing on a slot awaiting TopUp returned "no connection"
+	// while dozens of live connections sat busy one index away. Under load
+	// that is not rare — every discarded connection leaves a dead slot until
+	// the next TopUp, and TopUp runs per pass behind a cooldown, so a provider
+	// dropping connections mid-pass poisons a share of every acquire until the
+	// pass ends. Prod logged 1.2M "no usable connection in pool" and, after
+	// those slots refilled, "all connections busy" against a pool that was
+	// merely working.
+	//
+	// Skipping a dead slot costs nothing: its mutex is unheld, so the Lock
+	// returns immediately and the walk moves on. The only place this blocks is
+	// a genuinely leased slot, which is the backpressure the pool is for.
+	// All-dead still ends at ok=false, so acquireErr reports ErrPoolEmpty and
+	// the caller is told to stop retrying.
+	for attempt := 0; attempt < n; attempt++ {
+		i := int(atomic.AddUint64(&p.idx, 1) % uint64(n))
+		c := snapshot[i]
+		c.mu.Lock()
+		// Re-checked AFTER the wait, not before: the holder we queued behind
+		// may have discarded this connection on its way out, which is exactly
+		// how a busy pool turns into a false empty one under churn.
+		if c.conn == nil {
+			c.mu.Unlock()
+			continue
+		}
+		return c, i, true
 	}
-	return c, i, true
+	return nil, 0, false
 }
 
 // snapshot copies the slot slice so lease attempts don't hold the pool lock.
