@@ -56,6 +56,14 @@ func ServiceLoop(ctx context.Context, job *JobInfo, initialDelay, defaultInterva
 	if len(hooks) > 0 {
 		h = hooks[0]
 	}
+	// Record the cadence on the job so /admin/jobs can show it. The registry
+	// renders IntervalMin and nothing was setting it from here, so every
+	// loop-driven job displayed "—" unless its plugin happened to assign the
+	// field by hand — which meant the number was duplicated at both ends and
+	// usually only correct at one. An explicit assignment still wins.
+	if job != nil && job.IntervalMin == 0 && defaultInterval > 0 {
+		job.IntervalMin = int(defaultInterval / time.Minute)
+	}
 	if !SleepCtx(ctx, initialDelay) {
 		return
 	}

@@ -53,6 +53,14 @@ type Job interface {
 	// /admin/jobs "run now" button fires. Manual triggers bypass
 	// the off-peak gate.
 	SetTrigger(fn func())
+
+	// IsPaused reports whether an admin has paused this job.
+	//
+	// RunLoop already skips a paused job, so a loop-driven tick does
+	// not need to ask. This is for the MANUAL trigger, which does not
+	// go through the loop: without it, "run now" on a paused job runs
+	// it, which is not what pausing means.
+	IsPaused() bool
 }
 
 // SchedulerAdapter bundles the callbacks the host supplies to
@@ -94,3 +102,4 @@ func (noopJob) SetError(string)    {}
 func (noopJob) Log(string, ...any) {}
 func (noopJob) MarkOffPeak() Job   { return noopJob{} }
 func (noopJob) SetTrigger(func())  {}
+func (noopJob) IsPaused() bool     { return false }
