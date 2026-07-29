@@ -227,6 +227,35 @@ func (j *JobInfo) SetRunning() {
 	}
 }
 
+// AnnounceNextRun publishes when this job is next due, without ending a run.
+//
+// SetIdle is the wrong tool for this and cannot be reused: it also CLOSES OUT
+// a run — clearing LastError, releasing the run id, and computing
+// LastDurationMs from StartedAt, which before a job's first run is the zero
+// time and would record a duration of roughly two thousand years.
+//
+// This exists because a loop-driven job spends its boot delay reporting
+// status=idle, run_count=0 and a zero next_run — which is character for
+// character what a job that was never scheduled at all reports. That ambiguity
+// is not cosmetic: it hid a plugin whose job really was unscheduled, through
+// several deploys and several rounds of "why is it idle?", because the broken
+// state was indistinguishable from the normal one.
+func (j *JobInfo) AnnounceNextRun(nextRun time.Time) {
+	if j == nil {
+		return
+	}
+	r := j.registry()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Only ever FILLS IN a status, never rewrites one. A job mid-run must keep
+	// reporting running: announcing when it is next due says nothing about
+	// whether it is busy now.
+	if j.Status == "" {
+		j.Status = "idle"
+	}
+	j.NextRun = nextRun
+}
+
 func (j *JobInfo) SetIdle(nextRun time.Time) {
 	r := j.registry()
 	cpuEnd := processCPUMs()

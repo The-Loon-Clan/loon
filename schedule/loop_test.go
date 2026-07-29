@@ -181,3 +181,128 @@ func TestRegistry_RoundTrip(t *testing.T) {
 		t.Error("ResumeJob did not resume")
 	}
 }
+
+// A job serving out its boot delay must be distinguishable from a job nobody
+// scheduled.
+//
+// Before this, ServiceLoop slept the initial delay without publishing anything,
+// so for that whole window — an hour for some jobs — the job reported
+// status=idle, run_count=0 and a zero next_run. That is character for character
+// what an unscheduled job reports. The ambiguity is not cosmetic: it concealed
+// a plugin whose job genuinely had no loop, across several deploys and several
+// rounds of "why is it idle?", because broken looked exactly like normal.
+func TestBootDelayPublishesTheFirstRunTime(t *testing.T) {
+	job := RegisterJob("loop test boot delay", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ran := make(chan struct{}, 1)
+	go ServiceLoop(ctx, job, 30*time.Second, time.Minute, func(context.Context) {
+		select {
+		case ran <- struct{}{}:
+		default:
+		}
+	})
+
+	// The announcement happens before the sleep, so it is visible almost at
+	// once — long before the 30s delay elapses.
+	deadline := time.Now().Add(3 * time.Second)
+	var next time.Time
+	for time.Now().Before(deadline) {
+		if snap := job.Snapshot(); !snap.NextRun.IsZero() {
+			next = snap.NextRun
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if next.IsZero() {
+		t.Fatal("next_run stayed zero during the boot delay — indistinguishable from a job that was never scheduled, " +
+			"which is exactly how an unscheduled job hid")
+	}
+	if d := time.Until(next); d < 20*time.Second || d > 31*time.Second {
+		t.Errorf("next_run is %s away, want ~30s (the boot delay)", d.Round(time.Second))
+	}
+
+	select {
+	case <-ran:
+		t.Error("the tick ran during the boot delay — the announcement must not replace the wait")
+	default:
+	}
+}
+
+// Announcing must never relabel a job that is mid-run, or a tick outliving its
+// interval would report idle while it is still working.
+func TestAnnounceNextRunLeavesARunningJobAlone(t *testing.T) {
+	job := RegisterJob("loop test announce running", "")
+	job.SetRunning()
+
+	job.AnnounceNextRun(time.Now().Add(time.Hour))
+
+	if got := job.Snapshot().Status; got != "running" {
+		t.Errorf("status = %q after announcing on a running job, want \"running\"", got)
+	}
+}
+
+// It must also not masquerade as the end of a run: SetIdle closes one out, and
+// borrowing it here would compute LastDurationMs from a zero StartedAt.
+func TestAnnounceNextRunDoesNotFakeACompletedRun(t *testing.T) {
+	job := RegisterJob("loop test announce duration", "")
+	job.AnnounceNextRun(time.Now().Add(time.Hour))
+
+	snap := job.Snapshot()
+	if snap.LastDurationMs != 0 {
+		t.Errorf("LastDurationMs = %d before the job ever ran; announcing a schedule "+
+			"must not be recorded as a completed run", snap.LastDurationMs)
+	}
+	if snap.NextRun.IsZero() {
+		t.Error("next_run was not published")
+	}
+}
+
+// After each tick the loop must republish using the interval it is ACTUALLY
+// about to sleep. Tick functions set their own next_run from their own idea of
+// the cadence, which drifts from the loop's the moment an operator overrides
+// the interval — so the displayed time came from the one component that does
+// not decide it.
+func TestNextRunTracksTheIntervalTheLoopActuallySleeps(t *testing.T) {
+	job := RegisterJob("loop test interval announce", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ticked := make(chan struct{}, 4)
+	// An operator override, as production installs. The announced time must
+	// follow the EFFECTIVE interval, not the compiled-in default — otherwise
+	// the display silently ignores the admin setting that changed it.
+	hooks := LoopHooks{Interval: func(context.Context, string, time.Duration) time.Duration {
+		return 20 * time.Minute
+	}}
+	go ServiceLoop(ctx, job, time.Millisecond, 45*time.Minute, func(context.Context) {
+		// A tick that lies about its own cadence, the way a job whose interval
+		// was overridden does.
+		job.SetIdle(time.Now().Add(2 * time.Hour))
+		select {
+		case ticked <- struct{}{}:
+		default:
+		}
+	}, hooks)
+
+	select {
+	case <-ticked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the tick never ran")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		d := time.Until(job.Snapshot().NextRun)
+		if d > 15*time.Minute && d < 21*time.Minute {
+			return // corrected to the effective (overridden) interval
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("next_run is %s away, want ~20m (the OVERRIDDEN interval). 45m means the default was used and "+
+		"the operator's setting is ignored; 2h means the tick's own guess was left standing",
+		time.Until(job.Snapshot().NextRun).Round(time.Minute))
+}

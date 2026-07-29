@@ -64,6 +64,11 @@ func ServiceLoop(ctx context.Context, job *JobInfo, initialDelay, defaultInterva
 	if job != nil && job.IntervalMin == 0 && defaultInterval > 0 {
 		job.IntervalMin = int(defaultInterval / time.Minute)
 	}
+	// Publish the first run time BEFORE sleeping it out. Without this a job
+	// spends its whole boot delay — an hour for some — reporting idle with a
+	// zero next_run and run_count 0, which reads exactly like a job nobody
+	// scheduled. See AnnounceNextRun.
+	job.AnnounceNextRun(time.Now().Add(initialDelay))
 	if !SleepCtx(ctx, initialDelay) {
 		return
 	}
@@ -79,6 +84,12 @@ func ServiceLoop(ctx context.Context, job *JobInfo, initialDelay, defaultInterva
 			runTickProtected(ctx, job, tickFn, h.OnPanic)
 		}
 		interval := effectiveInterval(ctx, job.Name, defaultInterval, h.Interval)
+		// Announce again with the interval the loop is ACTUALLY about to sleep.
+		// Tick functions set their own next_run from their own idea of the
+		// cadence, which drifts from the loop's whenever an operator overrides
+		// the interval — so the displayed time was a guess by the one component
+		// that does not decide it.
+		job.AnnounceNextRun(time.Now().Add(interval))
 		if !SleepCtx(ctx, interval) {
 			return
 		}
