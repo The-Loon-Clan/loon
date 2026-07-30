@@ -258,16 +258,33 @@ func (c *Conn) body() io.Reader {
 	return c.br
 }
 
+// maxResponseLine bounds one multiline-response line. The longest legitimate
+// line in any of these responses is an overview row a few KB long; a line
+// growing past a megabyte means the stream has desynced (or the server is
+// hostile), and the old unbounded ReadString would grow a buffer without
+// limit while waiting for a newline that may never come.
+const maxResponseLine = 1 << 20
+
 // readStrings reads a list of strings from the NNTP connection,
 // stopping at a line containing only a . (Convenience method for
-// LIST, etc.)
+// LIST, etc.) Each line is bounded by maxResponseLine.
 func (c *Conn) readStrings() ([]string, error) {
 	var sv []string
+	var acc []byte
 	for {
-		line, err := c.r.ReadString('\n')
+		frag, err := c.r.ReadSlice('\n')
+		acc = append(acc, frag...)
+		if err == bufio.ErrBufferFull {
+			if len(acc) > maxResponseLine {
+				return nil, ProtocolError("response line exceeds 1MB — stream desync")
+			}
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
+		line := string(acc)
+		acc = acc[:0]
 		if strings.HasSuffix(line, "\r\n") {
 			line = line[0 : len(line)-2]
 		} else if strings.HasSuffix(line, "\n") {
@@ -278,7 +295,7 @@ func (c *Conn) readStrings() ([]string, error) {
 		}
 		sv = append(sv, line)
 	}
-	return []string(sv), nil
+	return sv, nil
 }
 
 // Authenticate logs in to the NNTP server.
@@ -392,20 +409,50 @@ type MessageOverview struct {
 	Extra         []string  // Any additional fields returned by the server.
 }
 
+// OverviewStats accounts for every line an OVER response carried versus what
+// parsed. The four drop reasons used to be bare `continue`s — invisible — and
+// a consumer recording per-range coverage after a fetch (the loon usenet
+// crawler does) then treats the dropped articles as offered-and-absent
+// FOREVER: coverage says "fetched", nothing re-reads the range, and a
+// provider quirk (an extra tab in a subject, a non-numeric byte count)
+// becomes permanent silent content loss. Counting the drops is what lets the
+// consumer notice the quirk instead of inheriting it as truth.
+type OverviewStats struct {
+	Lines         int // response lines received (excluding the terminator)
+	Parsed        int // lines that became MessageOverviews
+	DroppedFields int // fewer than 8 tab-separated fields
+	DroppedNumber int // unparseable message number
+	DroppedNoID   int // empty message-id
+	DroppedBytes  int // unparseable byte count
+}
+
+// Dropped is the total lines lost to all reasons.
+func (s OverviewStats) Dropped() int {
+	return s.DroppedFields + s.DroppedNumber + s.DroppedNoID + s.DroppedBytes
+}
+
 // Overview returns overviews of all messages in the current group with message number between
 // begin and end, inclusive. WireBytes is the actual bytes received on the wire.
 func (c *Conn) Overview(begin, end int) ([]MessageOverview, int64, error) {
+	res, wire, _, err := c.OverviewWithStats(begin, end)
+	return res, wire, err
+}
+
+// OverviewWithStats is Overview plus the parse accounting.
+func (c *Conn) OverviewWithStats(begin, end int) ([]MessageOverview, int64, OverviewStats, error) {
+	var stats OverviewStats
 	if _, _, err := c.cmd(224, "OVER %d-%d", begin, end); err != nil {
 		// Fall back to XOVER for servers that predate RFC 3977
 		if _, _, err2 := c.cmd(224, "XOVER %d-%d", begin, end); err2 != nil {
-			return nil, 0, err
+			return nil, 0, stats, err
 		}
 	}
 
 	lines, err := c.readStrings()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, stats, err
 	}
+	stats.Lines = len(lines)
 
 	// Track actual wire bytes for accurate throughput measurement.
 	var wireBytes int64
@@ -418,11 +465,13 @@ func (c *Conn) Overview(begin, end int) ([]MessageOverview, int64, error) {
 		overview := MessageOverview{}
 		ss := strings.SplitN(strings.TrimSpace(line), "\t", 9)
 		if len(ss) < 8 {
-			continue // skip malformed line
+			stats.DroppedFields++
+			continue
 		}
 		overview.MessageNumber, err = strconv.Atoi(ss[0])
 		if err != nil {
-			continue // skip bad message number
+			stats.DroppedNumber++
+			continue
 		}
 		overview.Subject = ss[1]
 		overview.From = ss[2]
@@ -432,12 +481,14 @@ func (c *Conn) Overview(begin, end int) ([]MessageOverview, int64, error) {
 		}
 		overview.MessageId = ss[4]
 		if overview.MessageId == "" {
-			continue // skip articles without message-id
+			stats.DroppedNoID++
+			continue
 		}
 		overview.References = strings.Split(ss[5], " ")
 		overview.Bytes, err = strconv.Atoi(ss[6])
 		if err != nil {
-			continue // skip bad byte count
+			stats.DroppedBytes++
+			continue
 		}
 		overview.Lines, err = strconv.Atoi(ss[7])
 		if err != nil {
@@ -446,7 +497,8 @@ func (c *Conn) Overview(begin, end int) ([]MessageOverview, int64, error) {
 		overview.Extra = append([]string{}, ss[8:]...)
 		result = append(result, overview)
 	}
-	return result, wireBytes, nil
+	stats.Parsed = len(result)
+	return result, wireBytes, stats, nil
 }
 
 // parseGroups is used to parse a list of group states.
