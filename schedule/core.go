@@ -23,11 +23,25 @@ func CoreScheduler(reg *Registry) core.SchedulerService {
 			return coreJob{j: reg.RegisterJob(name, desc)}
 		},
 		RunLoopFn: func(ctx context.Context, job core.Job, bootDelay, defaultInterval time.Duration, runFn func(context.Context)) {
-			cj, ok := job.(coreJob)
-			if !ok {
-				log.Panicf("schedule: RunLoop given a Job not minted by RegisterJob (%T)", job)
+			// Plugins may DECORATE the handle RegisterJob returned (telemetry,
+			// accounting) and hand the decorated value back — a legitimate
+			// pattern this assertion used to reject with a panic, which took a
+			// production worker down in a sub-second crash loop on its first
+			// RunLoop call. Anything that is not the minted handle must expose
+			// it via Unwrap; only a job with NO path back to a minted handle
+			// is a programmer error, and that still fails loud. Depth-capped
+			// so a cyclic Unwrap cannot hang boot instead.
+			for depth := 0; ; depth++ {
+				if cj, ok := job.(coreJob); ok {
+					go ServiceLoop(ctx, cj.j, bootDelay, defaultInterval, runFn)
+					return
+				}
+				u, ok := job.(interface{ Unwrap() core.Job })
+				if !ok || depth >= 8 {
+					log.Panicf("schedule: RunLoop given a Job not minted by RegisterJob and not unwrappable to one (%T)", job)
+				}
+				job = u.Unwrap()
 			}
-			go ServiceLoop(ctx, cj.j, bootDelay, defaultInterval, runFn)
 		},
 	})
 }
