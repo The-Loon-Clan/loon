@@ -129,6 +129,10 @@ type Core struct {
 	// renders as fragments and the host wraps in its own chrome.
 	viewMu sync.Mutex
 	views  []View
+
+	// access is the site's registration + viewing posture, published by the
+	// host at boot and on every operator toggle. See access.go.
+	access accessState
 }
 
 // LoggerFor returns a child logger tagged with plugin=<name>.
