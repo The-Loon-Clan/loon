@@ -40,6 +40,56 @@ loon has zero dependencies on any application package: the host
 adapts its own storage, sessions, and job registry onto the
 interfaces at its composition root.
 
+## The extension directory
+
+Plugins publish services for each other through one registry, and consume them
+by name:
+
+```go
+c.Register("wiki.render", renderer)          // publish
+svc, ok := c.Lookup("wiki.render")           // consume, then assert
+```
+
+That works and stays supported. But a name and a Go type answer *what do I
+assert to* and not *what is this for*, and — the one a type genuinely cannot
+answer — *am I meant to call this, or supply it?* `func(context.Context,
+int64) error` reads identically either way.
+
+So a seam worth explaining registers with a definition:
+
+```go
+c.RegisterDef(core.ExtensionDef{
+    Name:    "rewards.trigger",
+    Summary: "fire a surface's rewards for one member",
+    Kind:    core.ExtService,
+    Stable:  true,
+}, engine)
+```
+
+`Kind` is the direction:
+
+| kind | meaning |
+|---|---|
+| `service` | the registrant offers behaviour; you call it |
+| `callback` | **you** supply it and its owner calls you — a host's counter for a `per_unit` reward is this |
+| `data` | a value rather than behaviour — a catalogue, a config set |
+
+Everything lands in the same registry with the same `Lookup` and the same
+duplicate rule; the definition only means the directory can describe it.
+`/admin/plugins` renders the lot — every core service with whether *this* host
+wired it, and every published extension with its kind, summary and the concrete
+type to assert to. An undescribed extension still appears, marked
+`undescribed`, because a seam you can see and not explain still beats one you
+cannot see.
+
+A def with an empty summary is refused. It would take the space the answer goes
+in and give nothing back, and `Register(name, svc)` already says "no comment"
+more honestly.
+
+`Stable: false` marks a seam still moving. A consumer may depend on it anyway —
+this only says they should expect to be broken, which is kinder than finding
+out.
+
 ## Status
 
 Production-proven: loon runs behind a full content site (~19 plugins)

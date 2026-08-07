@@ -82,6 +82,16 @@ type adminExtensionRow struct {
 	// assert to. Derived by reflection: the registry stores `any`, so this is
 	// the only place the answer exists at runtime.
 	Type string
+	// Summary and Kind come from RegisterDef and are empty for the plain
+	// string form, which is most of them. Kind is the one a Go type cannot
+	// supply: the same func signature reads identically whether you call it
+	// or implement it.
+	Summary string
+	Kind    string
+	Since   string
+	// Unstable is shown rather than Stable so the table only marks the ones
+	// worth a second look — a column of "yes" teaches a reader to skip it.
+	Unstable bool
 }
 
 type adminPluginRow struct {
@@ -170,7 +180,12 @@ func extensionRows(c *Core) []adminExtensionRow {
 		if v, ok := c.Lookup(n); ok {
 			typ = fmt.Sprintf("%T", v)
 		}
-		out = append(out, adminExtensionRow{Name: n, Owner: owner, Type: typ})
+		row := adminExtensionRow{Name: n, Owner: owner, Type: typ}
+		if d, ok := c.ExtensionDefinition(n); ok {
+			row.Summary, row.Kind, row.Since = d.Summary, string(d.Kind), d.Since
+			row.Unstable = !d.Stable
+		}
+		out = append(out, row)
 	}
 	return out
 }
@@ -306,14 +321,22 @@ const adminPluginsHTML = `<!doctype html>
                 <tr>
                     <th scope="col">Name</th>
                     <th scope="col">Owner</th>
+                    <th scope="col">Kind</th>
+                    <th scope="col">What it is for</th>
                     <th scope="col">Type to assert</th>
                 </tr>
             </thead>
             <tbody>
             {{range .Extensions}}
                 <tr>
-                    <td><code>{{.Name}}</code></td>
+                    <td>
+                        <code>{{.Name}}</code>
+                        {{if .Unstable}}<span class="badge bg-warning text-dark ms-1" title="This seam is still moving; expect to be broken.">unstable</span>{{end}}
+                        {{if .Since}}<span class="text-muted small ms-1">since {{.Since}}</span>{{end}}
+                    </td>
                     <td>{{if .Owner}}<code>{{.Owner}}</code>{{else}}<span class="text-muted">&mdash;</span>{{end}}</td>
+                    <td>{{if .Kind}}<code>{{.Kind}}</code>{{else}}<span class="text-muted">&mdash;</span>{{end}}</td>
+                    <td>{{if .Summary}}{{.Summary}}{{else}}<span class="text-muted">undescribed</span>{{end}}</td>
                     <td><code class="small">{{.Type}}</code></td>
                 </tr>
             {{end}}

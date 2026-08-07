@@ -120,7 +120,13 @@ func (stubUsers) BulkDisplayNames(context.Context, []int64) (map[int64]string, e
 // is what turns both into a test failure.
 func TestAdminPageRendersEverySection(t *testing.T) {
 	c := &Core{Users: stubUsers{}}
-	if err := c.Register("wiki.render", stubUsers{}); err != nil {
+	if err := c.RegisterDef(ExtensionDef{
+		Name: "wiki.render", Summary: "render wiki markdown to sanitised HTML",
+		Kind: ExtService, Stable: true,
+	}, stubUsers{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := c.Register("plain.thing", stubUsers{}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	v := buildAdminViewFor(c)
@@ -143,6 +149,11 @@ func TestAdminPageRendersEverySection(t *testing.T) {
 		"the registry heading":  "Published extensions",
 		"the extension name":    "wiki.render",
 		"the type to assert to": "stubUsers",
+		"the summary":           "render wiki markdown",
+		"the kind":              "service",
+		// An undescribed extension must still appear, and say so rather than
+		// leaving a blank cell that reads like a rendering bug.
+		"the undescribed row": "undescribed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the page is missing %s (%q)", what, want)
@@ -157,5 +168,109 @@ func TestAdminPageRendersEverySection(t *testing.T) {
 	}
 	if !strings.Contains(empty.String(), "Nothing registered") {
 		t.Error("a host with no extensions rendered no explanation")
+	}
+}
+
+// RegisterDef is the same registry with a sentence attached. What it buys over
+// reflection is Kind: `func(context.Context, int64) error` reads identically
+// whether you call it or implement it, and no type can say which.
+func TestRegisterDefDescribesTheSeam(t *testing.T) {
+	c := &Core{}
+	if err := c.RegisterDef(ExtensionDef{
+		Name: "wiki.render", Summary: "render wiki markdown to sanitised HTML",
+		Kind: ExtService, Since: "1.2.0", Stable: true,
+	}, stubUsers{}); err != nil {
+		t.Fatalf("RegisterDef: %v", err)
+	}
+	// The plain form still works and still appears — most registrations are
+	// this, and they must not become second-class.
+	if err := c.Register("plain.thing", stubUsers{}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// A described extension is looked up exactly like any other; the def is
+	// beside the registry, not in front of it.
+	if _, ok := c.Lookup("wiki.render"); !ok {
+		t.Fatal("a described extension is not resolvable through Lookup")
+	}
+
+	rows := map[string]adminExtensionRow{}
+	for _, r := range extensionRows(c) {
+		rows[r.Name] = r
+	}
+	if got := rows["wiki.render"]; got.Summary == "" || got.Kind != "service" ||
+		got.Since != "1.2.0" || got.Unstable {
+		t.Errorf("described row lost its definition: %+v", got)
+	}
+	if got := rows["plain.thing"]; got.Summary != "" || got.Kind != "" {
+		t.Errorf("an undescribed row invented a description: %+v", got)
+	}
+	if got := rows["plain.thing"]; got.Type == "" {
+		t.Error("an undescribed row lost its type, which is the one thing it did have")
+	}
+}
+
+// A def with no summary is worse than no def: it occupies the space the answer
+// would go in and gives nothing back. Same for a kind nobody can act on.
+func TestRegisterDefRefusesAnEmptyDefinition(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		def  ExtensionDef
+		want string
+	}{
+		{"no name", ExtensionDef{Summary: "x", Kind: ExtService}, "no name"},
+		{"no summary", ExtensionDef{Name: "a.b", Kind: ExtService}, "no summary"},
+		{"unknown kind", ExtensionDef{Name: "a.b", Summary: "x", Kind: "sideways"}, "want service"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Core{}
+			err := c.RegisterDef(tc.def, stubUsers{})
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q, want it to mention %q", err, tc.want)
+			}
+			// And a rejected def must not have half-registered the service.
+			if _, ok := c.Lookup(tc.def.Name); ok && tc.def.Name != "" {
+				t.Error("the service was registered despite the def being refused")
+			}
+		})
+	}
+}
+
+// The duplicate rule is the registry's, and describing an extension must not
+// buy an exemption from it.
+func TestRegisterDefStillRefusesADuplicate(t *testing.T) {
+	c := &Core{}
+	def := ExtensionDef{Name: "a.b", Summary: "x", Kind: ExtService, Stable: true}
+	if err := c.RegisterDef(def, stubUsers{}); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := c.RegisterDef(def, stubUsers{}); err == nil {
+		t.Error("a second registration of the same name was accepted")
+	}
+	if err := c.Register("a.b", stubUsers{}); err == nil {
+		t.Error("the plain form was allowed to shadow a described extension")
+	}
+}
+
+// An unstable seam is marked; a stable one is not. Shown as "unstable" rather
+// than "stable" so the table only flags what is worth a second look — a
+// column of "yes" teaches a reader to skip it.
+func TestUnstableSeamsAreTheOnesMarked(t *testing.T) {
+	c := &Core{}
+	_ = c.RegisterDef(ExtensionDef{Name: "a.stable", Summary: "s", Kind: ExtService, Stable: true}, stubUsers{})
+	_ = c.RegisterDef(ExtensionDef{Name: "b.moving", Summary: "s", Kind: ExtCallback}, stubUsers{})
+
+	rows := map[string]adminExtensionRow{}
+	for _, r := range extensionRows(c) {
+		rows[r.Name] = r
+	}
+	if rows["a.stable"].Unstable {
+		t.Error("a stable seam was marked unstable")
+	}
+	if !rows["b.moving"].Unstable {
+		t.Error("a seam that is still moving was not marked")
 	}
 }

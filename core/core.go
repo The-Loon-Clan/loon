@@ -112,6 +112,11 @@ type Core struct {
 	// initialised so &Core{} test literals stay valid.
 	extMu sync.Mutex
 	ext   map[string]any
+	// extDefs is what each extension SAYS about itself, when its registrant
+	// bothered to say. Kept beside ext rather than in it so Lookup stays a map
+	// read of the value a consumer wants, and so Register (name, svc) can go
+	// on being the whole API for anyone who does not care.
+	extDefs map[string]ExtensionDef
 
 	// Plugin views (see views.go): pages/tabs/widgets a plugin
 	// renders as fragments and the host wraps in its own chrome.
