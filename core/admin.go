@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"html/template"
 	"net/http"
 	"sort"
@@ -50,6 +51,37 @@ func AdminHandler(rt *Runtime, c *Core) gin.HandlerFunc {
 type adminView struct {
 	Total   int
 	Plugins []adminPluginRow
+	// Services are the core capabilities a plugin can reach off *Core, and
+	// whether THIS host actually wired each one. Listed because "what can I
+	// use?" is the first question anyone building a plugin asks, and until now
+	// the only answer was to read core.go.
+	Services []adminServiceRow
+	// Extensions is the cross-plugin registry: what each plugin published for
+	// its peers to Lookup. The registry has always known this and nothing ever
+	// showed it, so the way to discover a peer's seam was to grep for
+	// Register.
+	Extensions []adminExtensionRow
+}
+
+// adminServiceRow is one core service and whether the host supplied it.
+type adminServiceRow struct {
+	Name    string
+	Wired   bool
+	Purpose string
+}
+
+// adminExtensionRow is one published extension.
+type adminExtensionRow struct {
+	Name string
+	// Owner is the part before the first dot, which is the naming convention
+	// ("<plugin>.<service>") rather than anything the registry enforces.
+	// Shown as a grouping, not as a fact — an extension named without a dot
+	// gets attributed to nobody, which is itself worth seeing.
+	Owner string
+	// Type is the concrete Go type registered, which is what a consumer must
+	// assert to. Derived by reflection: the registry stores `any`, so this is
+	// the only place the answer exists at runtime.
+	Type string
 }
 
 type adminPluginRow struct {
@@ -87,7 +119,60 @@ func buildAdminView(ctx context.Context, rt *Runtime, c *Core) adminView {
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
-	return adminView{Total: len(rows), Plugins: rows}
+	return adminView{
+		Total:      len(rows),
+		Plugins:    rows,
+		Services:   coreServices(c),
+		Extensions: extensionRows(c),
+	}
+}
+
+// coreServices reports which core capabilities this host wired.
+//
+// Every one is optional — a headless worker has no Router, a site without
+// points has no Points — and a plugin that needs one is expected to check.
+// The list is written out rather than reflected over the struct: the PURPOSE
+// column is the useful half, and reflection cannot produce it.
+func coreServices(c *Core) []adminServiceRow {
+	if c == nil {
+		return nil
+	}
+	return []adminServiceRow{
+		{"Users", c.Users != nil, "look a member up by id or name"},
+		{"Auth", c.Auth != nil, "who is this request, and gate a route by role"},
+		{"RBAC", c.RBAC != nil, "role checks beyond the session user"},
+		{"Entitlements", c.Entitlements != nil, "may this member do X — ranks and groups without knowing they exist"},
+		{"Storage", c.Storage != nil, "the database, and a schema-scoped handle per plugin"},
+		{"Scheduler", c.Scheduler != nil, "register a job and let the host run it"},
+		{"Router", c.Router != nil, "mount routes; absent in worker processes"},
+		{"Config", c.Config != nil, "read host configuration"},
+		{"Notifications", c.Notifications != nil, "tell a member something happened"},
+		{"Points", c.Points != nil, "credit and debit the economy"},
+		{"HTTPClient", c.HTTPClient != nil, "pooled, SSRF-guarded outbound HTTP"},
+		{"Logger", c.Logger != nil, "structured logging"},
+	}
+}
+
+// extensionRows lists the cross-plugin registry with each value's concrete
+// type, which is what a consumer has to assert to.
+func extensionRows(c *Core) []adminExtensionRow {
+	if c == nil {
+		return nil
+	}
+	names := c.ExtensionNames()
+	out := make([]adminExtensionRow, 0, len(names))
+	for _, n := range names {
+		owner := ""
+		if i := strings.Index(n, "."); i > 0 {
+			owner = n[:i]
+		}
+		typ := "?"
+		if v, ok := c.Lookup(n); ok {
+			typ = fmt.Sprintf("%T", v)
+		}
+		out = append(out, adminExtensionRow{Name: n, Owner: owner, Type: typ})
+	}
+	return out
 }
 
 // loadMigrationCounts queries core.plugin_migrations for the
@@ -173,6 +258,70 @@ const adminPluginsHTML = `<!doctype html>
     </div>
     <p class="text-muted small mt-3">
         Total: {{.Total}} plugin(s) registered.
+    </p>
+    {{end}}
+
+    <h2 class="h5 mt-5">Core services</h2>
+    <p class="text-muted small">
+        What a plugin can reach off <code>*core.Core</code>. Every one is
+        optional &mdash; a worker process has no Router, a site without an
+        economy has no Points &mdash; so a plugin that needs one checks for it
+        rather than assuming.
+    </p>
+    <div class="table-responsive">
+        <table class="table table-sm table-dark table-striped align-middle">
+            <thead>
+                <tr>
+                    <th scope="col">Service</th>
+                    <th scope="col">On this host</th>
+                    <th scope="col">What it is for</th>
+                </tr>
+            </thead>
+            <tbody>
+            {{range .Services}}
+                <tr>
+                    <td><code>Core.{{.Name}}</code></td>
+                    <td>{{if .Wired}}<span class="text-success">wired</span>{{else}}<span class="text-muted">absent</span>{{end}}</td>
+                    <td class="text-muted">{{.Purpose}}</td>
+                </tr>
+            {{end}}
+            </tbody>
+        </table>
+    </div>
+
+    <h2 class="h5 mt-5">Published extensions</h2>
+    <p class="text-muted small">
+        The cross-plugin registry: what each plugin offered its peers. Consume
+        one with <code>c.Lookup("name")</code> and assert it to the type below
+        &mdash; the registry stores <code>any</code>, so that assertion is the
+        contract. Declare the provider in <code>Metadata.Requires</code> and
+        Boot guarantees it is registered before your Provision runs.
+    </p>
+    {{if not .Extensions}}
+    <p class="text-muted small"><em>Nothing registered. Either no plugin publishes a seam, or Boot has not run.</em></p>
+    {{else}}
+    <div class="table-responsive">
+        <table class="table table-sm table-dark table-striped align-middle">
+            <thead>
+                <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Owner</th>
+                    <th scope="col">Type to assert</th>
+                </tr>
+            </thead>
+            <tbody>
+            {{range .Extensions}}
+                <tr>
+                    <td><code>{{.Name}}</code></td>
+                    <td>{{if .Owner}}<code>{{.Owner}}</code>{{else}}<span class="text-muted">&mdash;</span>{{end}}</td>
+                    <td><code class="small">{{.Type}}</code></td>
+                </tr>
+            {{end}}
+            </tbody>
+        </table>
+    </div>
+    <p class="text-muted small mt-3">
+        {{len .Extensions}} extension(s) published.
     </p>
     {{end}}
 </div>
