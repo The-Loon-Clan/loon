@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -80,7 +81,7 @@ func TestTheBusKnowsWhoListens(t *testing.T) {
 	c := &Core{}
 	if err := c.DeclareEvent(EventDef{
 		Name: "forum.post.created", Summary: "a member posted", Emitter: "forum",
-		Countable: true, Stable: true,
+		Kind: EventMember, Countable: true, Stable: true,
 	}); err != nil {
 		t.Fatalf("declare: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestTheBusKnowsWhoListens(t *testing.T) {
 // indistinguishable from working until somebody asks why a listener is quiet.
 func TestOrphanSubscriptionsAreDiscoverable(t *testing.T) {
 	c := &Core{}
-	_ = c.DeclareEvent(EventDef{Name: "real.event", Summary: "s", Emitter: "e"})
+	_ = c.DeclareEvent(EventDef{Name: "real.event", Summary: "s", Emitter: "e", Kind: EventMember})
 	c.On("real.event", "sub", func(context.Context, Event) {})
 	c.On("typo.evnet", "sub", func(context.Context, Event) {})
 
@@ -141,9 +142,14 @@ func TestDeclareEventRejectsTheUseless(t *testing.T) {
 		def  EventDef
 		want string
 	}{
-		{"no name", EventDef{Summary: "s", Emitter: "e"}, "no name"},
-		{"no summary", EventDef{Name: "a.b", Emitter: "e"}, "no summary"},
-		{"no emitter", EventDef{Name: "a.b", Summary: "s"}, "no emitter"},
+		{"no name", EventDef{Summary: "s", Emitter: "e", Kind: EventMember}, "no name"},
+		{"no summary", EventDef{Name: "a.b", Emitter: "e", Kind: EventMember}, "no summary"},
+		{"no emitter", EventDef{Name: "a.b", Summary: "s", Kind: EventMember}, "no emitter"},
+		{"no kind", EventDef{Name: "a.b", Summary: "s", Emitter: "e"}, "want member or system"},
+		// The contradiction: countable means "total it per member", and a
+		// system event has no member to total against.
+		{"system and countable", EventDef{Name: "a.b", Summary: "s", Emitter: "e",
+			Kind: EventSystem, Countable: true}, "no member to count it against"},
 	} {
 		if err := c.DeclareEvent(tc.def); err == nil {
 			t.Errorf("%s: accepted", tc.name)
@@ -151,7 +157,7 @@ func TestDeclareEventRejectsTheUseless(t *testing.T) {
 			t.Errorf("%s: error %q, want it to mention %q", tc.name, err, tc.want)
 		}
 	}
-	good := EventDef{Name: "a.b", Summary: "s", Emitter: "e"}
+	good := EventDef{Name: "a.b", Summary: "s", Emitter: "e", Kind: EventMember}
 	if err := c.DeclareEvent(good); err != nil {
 		t.Fatalf("good def refused: %v", err)
 	}
@@ -194,5 +200,37 @@ func TestBusToleratesAnEmptyCore(t *testing.T) {
 	c.Emit(context.Background(), Event{Name: "x"})
 	if c.EventDefs() != nil || c.EventSubscribers("x") != nil || c.SubscribedEventNames() != nil {
 		t.Error("a nil Core produced non-nil bus state")
+	}
+}
+
+// A member event with no member is an emitter that forgot to set UserID, and
+// the symptom is silence: every per-member subscriber skips it, so the
+// achievement never moves and nothing says why.
+func TestMemberEventWithNoMemberIsLogged(t *testing.T) {
+	var buf strings.Builder
+	c := &Core{Logger: slog.New(slog.NewTextHandler(&buf, nil))}
+	_ = c.DeclareEvent(EventDef{Name: "forum.post.created", Summary: "s",
+		Emitter: "forum", Kind: EventMember, Countable: true})
+	_ = c.DeclareEvent(EventDef{Name: "usenet.indexed", Summary: "s",
+		Emitter: "usenet", Kind: EventSystem})
+
+	c.Emit(context.Background(), Event{Name: "forum.post.created", UserID: 0})
+	if !strings.Contains(buf.String(), "member event emitted with no member") {
+		t.Error("a member event with UserID 0 passed silently — the emitter forgot, " +
+			"and the only symptom would be an achievement that never moves")
+	}
+
+	// A SYSTEM event with no member is the normal case and must say nothing.
+	buf.Reset()
+	c.Emit(context.Background(), Event{Name: "usenet.indexed", UserID: 0})
+	if strings.Contains(buf.String(), "no member") {
+		t.Error("a system event with no member was warned about; that is its whole point")
+	}
+
+	// And a member event WITH a member is silent too.
+	buf.Reset()
+	c.Emit(context.Background(), Event{Name: "forum.post.created", UserID: 42})
+	if strings.Contains(buf.String(), "no member") {
+		t.Error("a correctly-attributed member event was warned about")
 	}
 }

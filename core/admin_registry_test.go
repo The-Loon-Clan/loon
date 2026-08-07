@@ -133,7 +133,7 @@ func TestAdminPageRendersEverySection(t *testing.T) {
 	}
 	if err := c.DeclareEvent(EventDef{
 		Name: "forum.post.created", Summary: "a member posted in a thread",
-		Emitter: "forum", Countable: true, Stable: true,
+		Emitter: "forum", Kind: EventMember, Countable: true, Stable: true,
 	}); err != nil {
 		t.Fatalf("declare: %v", err)
 	}

@@ -132,6 +132,25 @@ undeclared event still delivers — failing a member's action over a missing doc
 comment would be absurd — but it does not appear in the directory, so the only
 way to learn it exists is to read the emitter's source.
 
+`Kind` says **who acted**, and it is required because either default would be
+wrong half the time in a way nothing reports:
+
+| kind | meaning |
+|---|---|
+| `member` | a member did it; `UserID` is the actor and counting it against them is meaningful |
+| `system` | the site did it, or it happened *to* the site. `UserID` may name somebody involved, but they did not act |
+
+The case that forced the field: `auth.failed_login_spike` carries the username
+being **guessed at** — a victim, not an actor. Before `Kind` existed, the only
+thing stopping a subscriber counting failed logins against that member was a
+comment asking the emitter to leave `UserID` at zero. A `system` event may not
+be `Countable`, and core refuses the combination, because there is no member to
+total it against.
+
+Emitting a `member` event with `UserID` zero is logged. That is an emitter that
+forgot, and the symptom is otherwise pure silence: every per-member subscriber
+skips it, the achievement never moves, and nothing says why.
+
 `Countable` marks an event worth totalling per member. That is what an
 achievement threshold can be scored on; "member deleted their account" is an
 event nobody should build one from.

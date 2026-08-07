@@ -74,10 +74,15 @@ type adminView struct {
 }
 
 type adminEventRow struct {
-	Name        string
-	Summary     string
-	Emitter     string
-	Payload     string
+	Name    string
+	Summary string
+	Emitter string
+	Payload string
+	// Kind is who acted — member or system. Shown because it decides whether
+	// a subscriber may count the event against anybody, and because a system
+	// event that names somebody (a login spike names the account being
+	// guessed at) reads exactly like a member event without it.
+	Kind        string
 	Countable   bool
 	Unstable    bool
 	Subscribers []string
@@ -174,7 +179,8 @@ func eventRows(c *Core) []adminEventRow {
 	for _, d := range defs {
 		out = append(out, adminEventRow{
 			Name: d.Name, Summary: d.Summary, Emitter: d.Emitter,
-			Payload: d.Payload, Countable: d.Countable, Unstable: !d.Stable,
+			Payload: d.Payload, Kind: string(d.Kind),
+			Countable: d.Countable, Unstable: !d.Stable,
 			Subscribers: c.EventSubscribers(d.Name),
 		})
 	}
@@ -434,6 +440,7 @@ const adminPluginsHTML = `<!doctype html>
             <thead>
                 <tr>
                     <th scope="col">Event</th>
+                    <th scope="col">Who acted</th>
                     <th scope="col">Emitted by</th>
                     <th scope="col">What happened</th>
                     <th scope="col">Listeners</th>
@@ -448,6 +455,7 @@ const adminPluginsHTML = `<!doctype html>
                         {{if .Unstable}}<span class="badge bg-warning text-dark ms-1" title="Still finding its shape; expect to be broken.">unstable</span>{{end}}
                         {{if .Payload}}<div class="text-muted small">Data: <code>{{.Payload}}</code></div>{{end}}
                     </td>
+                    <td>{{if eq .Kind "system"}}<span class="badge bg-secondary">system</span>{{else}}<span class="badge bg-primary">member</span>{{end}}</td>
                     <td><code>{{.Emitter}}</code></td>
                     <td>{{.Summary}}</td>
                     <td>

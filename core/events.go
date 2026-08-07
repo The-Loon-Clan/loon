@@ -70,6 +70,27 @@ type Event struct {
 // failed by a listener would be a dependency again.
 type EventHandler func(ctx context.Context, e Event)
 
+// EventKind says WHO ACTED, which is the first thing a subscriber needs and
+// the thing that was previously only inferrable from UserID being zero.
+//
+// Inferring it was not merely inelegant. auth.failed_login_spike carries a
+// username — the account being guessed at — who is a victim rather than an
+// actor, and the only thing stopping a subscriber counting it against them was
+// a comment asking the emitter to leave UserID at zero. A field says it
+// instead, and validation can then refuse the combinations that make no sense.
+type EventKind string
+
+const (
+	// EventMember — a MEMBER did this. UserID is the actor, and counting it
+	// against them is meaningful.
+	EventMember EventKind = "member"
+	// EventSystem — the site did it, or it happened TO the site. A crawler
+	// indexing a release, an address failing to log in repeatedly. UserID may
+	// name somebody involved, but they did not act and nothing should be
+	// credited or blamed on them for it.
+	EventSystem EventKind = "system"
+)
+
 // EventDef is what an emitter says about an event it produces.
 //
 // Declared once at Provision, so the directory can list what
@@ -87,6 +108,10 @@ type EventDef struct {
 	Summary string
 	// Emitter is the plugin that fires it.
 	Emitter string
+	// Kind says who acted: a member, or the system. Required — the default
+	// would have to be one of them, and either default is wrong half the time
+	// in a way nothing would report.
+	Kind EventKind
 	// Payload describes Data when the event carries any, naming
 	// the concrete type a subscriber should assert to. Empty
 	// means the common fields are all there is.
@@ -110,6 +135,14 @@ func (d EventDef) Validate() error {
 		return fmt.Errorf("core: event %q has no summary; a listener cannot tell what it means", d.Name)
 	case d.Emitter == "":
 		return fmt.Errorf("core: event %q names no emitter; nobody could tell who to ask about it", d.Name)
+	case d.Kind != EventMember && d.Kind != EventSystem:
+		return fmt.Errorf("core: event %q has kind %q; want member or system", d.Name, d.Kind)
+	case d.Countable && d.Kind == EventSystem:
+		// The contradiction worth refusing. Countable means "worth totalling
+		// PER MEMBER", and a system event has no member to total against — so
+		// an achievement scored on one would either never move or credit
+		// whoever happened to be named in it. Both are silent.
+		return fmt.Errorf("core: event %q is system-kind but countable; there is no member to count it against", d.Name)
 	}
 	return nil
 }
@@ -201,6 +234,17 @@ func (c *Core) Emit(ctx context.Context, e Event) {
 	if e.Count == 0 {
 		e.Count = 1
 	}
+	// A member event with no member is an emitter that forgot, and the symptom
+	// is silence: every per-member subscriber skips it, so the achievement
+	// simply never moves and nothing reports why. Logged rather than dropped —
+	// the event may still be useful to a subscriber that does not care who did
+	// it, and swallowing it would trade one silent failure for another.
+	if c.Logger != nil {
+		if d, ok := c.eventDef(e.Name); ok && d.Kind == EventMember && e.UserID == 0 {
+			c.Logger.Warn("member event emitted with no member",
+				"event", e.Name, "emitter", d.Emitter)
+		}
+	}
 	c.evOnce()
 	c.events.mu.RLock()
 	subs := make([]eventSub, len(c.events.subs[e.Name]))
@@ -225,6 +269,15 @@ func (c *Core) deliver(ctx context.Context, s eventSub, e Event) {
 		}
 	}()
 	s.fn(ctx, e)
+}
+
+// eventDef looks one up without the sort EventDefs does.
+func (c *Core) eventDef(name string) (EventDef, bool) {
+	c.evOnce()
+	c.events.mu.RLock()
+	defer c.events.mu.RUnlock()
+	d, ok := c.events.defs[name]
+	return d, ok
 }
 
 // EventDefs returns every declared event, sorted by name.
