@@ -100,6 +100,8 @@ func buildAdminViewFor(c *Core) adminView {
 	return adminView{
 		Services:   coreServices(c),
 		Extensions: extensionRows(c),
+		Events:     eventRows(c),
+		Orphans:    orphanRows(c),
 	}
 }
 
@@ -129,6 +131,15 @@ func TestAdminPageRendersEverySection(t *testing.T) {
 	if err := c.Register("plain.thing", stubUsers{}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
+	if err := c.DeclareEvent(EventDef{
+		Name: "forum.post.created", Summary: "a member posted in a thread",
+		Emitter: "forum", Countable: true, Stable: true,
+	}); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	c.On("forum.post.created", "achievements", func(context.Context, Event) {})
+	c.On("nothing.declares.this", "achievements", func(context.Context, Event) {})
+
 	v := buildAdminViewFor(c)
 	v.Total = 1
 	v.Plugins = []adminPluginRow{{Name: "wiki", Version: "1.0.0",

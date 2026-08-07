@@ -90,6 +90,58 @@ more honestly.
 this only says they should expect to be broken, which is kinder than finding
 out.
 
+## Events
+
+The other direction. An extension is something you **call**; an event is
+something that **happens to you**.
+
+```go
+// The forum, in Provision -- declare what you emit so it is findable:
+c.DeclareEvent(core.EventDef{
+    Name: "forum.post.created", Summary: "a member posted in a thread",
+    Emitter: "forum", Countable: true, Stable: true,
+})
+
+// ...and announce it, wherever a post is created:
+c.Emit(ctx, core.Event{Name: "forum.post.created", UserID: u.ID, Subject: postID})
+
+// Achievements, in ITS Provision -- listen:
+c.On("forum.post.created", "achievements", func(ctx context.Context, e core.Event) {
+    progress.Add(ctx, e.UserID, e.Count)
+})
+```
+
+The forum does not know achievements exists. Achievements does not know the
+forum exists — only that *something* declared `forum.post.created`. Neither
+imports the other, and a third listener changes nothing on either side. A
+direct call between them would be a dependency, an ordering problem, and a
+reason for one plugin's bug to break the other.
+
+**Delivery is synchronous**, in subscription order, and a handler must be
+quick — hand off to your own goroutine if it is not. The alternative is a
+queue, and a queue that loses its contents on restart is worse than a handler
+you can see blocking: it turns "the achievement did not fire" into an
+unfalsifiable claim.
+
+**A panicking subscriber is contained.** The post already happened; one
+listener's bug must not unwind the action that announced it, nor stop the
+listeners after it.
+
+**Declaring is optional, and buys discoverability rather than permission.** An
+undeclared event still delivers — failing a member's action over a missing doc
+comment would be absurd — but it does not appear in the directory, so the only
+way to learn it exists is to read the emitter's source.
+
+`Countable` marks an event worth totalling per member. That is what an
+achievement threshold can be scored on; "member deleted their account" is an
+event nobody should build one from.
+
+`/admin/plugins` lists every declared event with its emitter and its listeners,
+and separately lists **subscriptions with no emitter** — a typo, or a plugin
+this host does not have. Those are worth surfacing because a listener for an
+event that never fires is completely silent, and silence is exactly what it
+looks like when everything is fine.
+
 ## Status
 
 Production-proven: loon runs behind a full content site (~19 plugins)

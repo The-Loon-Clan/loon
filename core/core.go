@@ -118,6 +118,13 @@ type Core struct {
 	// on being the whole API for anyone who does not care.
 	extDefs map[string]ExtensionDef
 
+	// events is the announcement bus — see events.go. Separate from the
+	// extension registry because the direction of knowledge is opposite: an
+	// extension's consumer names who it wants, an event's emitter does not
+	// know who is listening.
+	evInit sync.Once
+	events eventBus
+
 	// Plugin views (see views.go): pages/tabs/widgets a plugin
 	// renders as fragments and the host wraps in its own chrome.
 	viewMu sync.Mutex

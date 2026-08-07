@@ -61,6 +61,31 @@ type adminView struct {
 	// showed it, so the way to discover a peer's seam was to grep for
 	// Register.
 	Extensions []adminExtensionRow
+	// Events are the announcements plugins make and subscribe to. Listed
+	// beside the extensions because they answer the opposite question: an
+	// extension is something you call, an event is something that happens to
+	// you, and an author needs both to know what they can build.
+	Events []adminEventRow
+	// Orphans are subscriptions to events NOTHING declares — a typo, or an
+	// emitter this host did not install. Surfaced because they are
+	// indistinguishable from working: a listener for an event that never
+	// fires is silent, and silence is what it would look like if it were fine.
+	Orphans []adminOrphanRow
+}
+
+type adminEventRow struct {
+	Name        string
+	Summary     string
+	Emitter     string
+	Payload     string
+	Countable   bool
+	Unstable    bool
+	Subscribers []string
+}
+
+type adminOrphanRow struct {
+	Name        string
+	Subscribers []string
 }
 
 // adminServiceRow is one core service and whether the host supplied it.
@@ -134,7 +159,44 @@ func buildAdminView(ctx context.Context, rt *Runtime, c *Core) adminView {
 		Plugins:    rows,
 		Services:   coreServices(c),
 		Extensions: extensionRows(c),
+		Events:     eventRows(c),
+		Orphans:    orphanRows(c),
 	}
+}
+
+// eventRows lists every declared event with who listens to it.
+func eventRows(c *Core) []adminEventRow {
+	if c == nil {
+		return nil
+	}
+	defs := c.EventDefs()
+	out := make([]adminEventRow, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, adminEventRow{
+			Name: d.Name, Summary: d.Summary, Emitter: d.Emitter,
+			Payload: d.Payload, Countable: d.Countable, Unstable: !d.Stable,
+			Subscribers: c.EventSubscribers(d.Name),
+		})
+	}
+	return out
+}
+
+// orphanRows lists subscriptions to events nothing declared.
+func orphanRows(c *Core) []adminOrphanRow {
+	if c == nil {
+		return nil
+	}
+	declared := map[string]bool{}
+	for _, d := range c.EventDefs() {
+		declared[d.Name] = true
+	}
+	var out []adminOrphanRow
+	for _, n := range c.SubscribedEventNames() {
+		if !declared[n] {
+			out = append(out, adminOrphanRow{Name: n, Subscribers: c.EventSubscribers(n)})
+		}
+	}
+	return out
 }
 
 // coreServices reports which core capabilities this host wired.
@@ -346,6 +408,88 @@ const adminPluginsHTML = `<!doctype html>
     <p class="text-muted small mt-3">
         {{len .Extensions}} extension(s) published.
     </p>
+    {{end}}
+
+    <h2 class="h5 mt-5">Events</h2>
+    <p class="text-muted small">
+        The opposite direction to an extension. An extension is something you
+        <em>call</em>; an event is something that <em>happens to you</em>. The
+        emitter does not know who is listening and keeps working when nobody
+        is &mdash; the forum announces a post without knowing achievements
+        exists, and achievements listens without knowing the forum does.
+    </p>
+    <p class="text-muted small">
+        Subscribe in your <code>Provision</code>:
+        <code>c.On("forum.post.created", "yourplugin", handler)</code>.
+        Delivery is synchronous, so a handler must be quick &mdash; hand off to
+        your own goroutine if it is not. <strong>Countable</strong> marks an
+        event worth totalling per member, which is what an achievement
+        threshold can be scored on.
+    </p>
+    {{if not .Events}}
+    <p class="text-muted small"><em>No events declared. Emitters may still be firing undeclared ones &mdash; declaring is what makes them findable here.</em></p>
+    {{else}}
+    <div class="table-responsive">
+        <table class="table table-sm table-dark table-striped align-middle">
+            <thead>
+                <tr>
+                    <th scope="col">Event</th>
+                    <th scope="col">Emitted by</th>
+                    <th scope="col">What happened</th>
+                    <th scope="col">Listeners</th>
+                </tr>
+            </thead>
+            <tbody>
+            {{range .Events}}
+                <tr>
+                    <td>
+                        <code>{{.Name}}</code>
+                        {{if .Countable}}<span class="badge bg-info text-dark ms-1" title="Worth totalling per member; an achievement can be scored on it.">countable</span>{{end}}
+                        {{if .Unstable}}<span class="badge bg-warning text-dark ms-1" title="Still finding its shape; expect to be broken.">unstable</span>{{end}}
+                        {{if .Payload}}<div class="text-muted small">Data: <code>{{.Payload}}</code></div>{{end}}
+                    </td>
+                    <td><code>{{.Emitter}}</code></td>
+                    <td>{{.Summary}}</td>
+                    <td>
+                        {{if .Subscribers}}
+                            {{range .Subscribers}}<code class="me-1">{{.}}</code>{{end}}
+                        {{else}}
+                            <span class="text-muted">nobody</span>
+                        {{end}}
+                    </td>
+                </tr>
+            {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{end}}
+
+    {{if .Orphans}}
+    <h2 class="h6 mt-4 text-warning">Subscriptions with no emitter</h2>
+    <p class="text-muted small">
+        Somebody is listening for an event nothing on this host declares
+        &mdash; a typo, or a plugin that is not installed. Worth showing,
+        because a listener for an event that never fires is completely silent,
+        and silence is exactly what it would look like if it were working.
+    </p>
+    <div class="table-responsive">
+        <table class="table table-sm table-dark table-striped align-middle">
+            <thead>
+                <tr>
+                    <th scope="col">Listening for</th>
+                    <th scope="col">Who</th>
+                </tr>
+            </thead>
+            <tbody>
+            {{range .Orphans}}
+                <tr>
+                    <td><code>{{.Name}}</code></td>
+                    <td>{{range .Subscribers}}<code class="me-1">{{.}}</code>{{end}}</td>
+                </tr>
+            {{end}}
+            </tbody>
+        </table>
+    </div>
     {{end}}
 </div>
 </body>
