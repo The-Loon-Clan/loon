@@ -1,6 +1,8 @@
 package core
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -48,6 +50,11 @@ type RouterService interface {
 // pre-builds (session auth + role check / API-key check); the
 // constructor applies them to the admin/API groups so plugin
 // authors don't have to remember.
+//
+// Leaving either stack empty does NOT yield an open group — see
+// unwiredStack. A process that cannot authenticate (an api-only process with no
+// session middleware, say) should leave the admin stack empty deliberately and
+// let the group refuse, rather than hand plugins an unguarded /admin tree.
 type RouterAdapter struct {
 	Engine          *gin.Engine
 	AdminMiddleware []gin.HandlerFunc
@@ -78,11 +85,41 @@ func (r *routerAdapter) Mount(pluginName string) *gin.RouterGroup {
 	return r.engine.Group("/plugin/" + pluginName)
 }
 
+// unwiredStack is the fail-closed guard for a gated group whose host supplied
+// no middleware, mirroring AuthAdapter's unwiredGate.
+//
+// Admin and API are GATED groups by definition — the interface promises
+// "RequireRole(Admin) pre-wired" and "API-key auth pre-wired". A host that
+// wired neither has not decided the group should be open; it has not wired the
+// thing that decides. Returning a bare group would silently publish
+// /admin/plugin/<name>/* to anonymous callers, and the only signal would be
+// whatever the plugin's handler happens to do.
+//
+// This is a 503 rather than a nil group: nil compiles but a plugin that skips
+// the nil-check panics at boot, and a plugin that honours it drops its routes
+// with no trace. A registered-but-refusing route says which deployment is
+// misconfigured in the response itself.
+//
+// A plugin that genuinely wants an ungated route uses Engine() and says so.
+func unwiredStack(kind string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+			"ok": false,
+			"error": "the host wired no " + kind +
+				" middleware on this process, so this gated group refuses every request",
+		})
+	}
+}
+
 func (r *routerAdapter) Admin(pluginName string) *gin.RouterGroup {
 	if r == nil || r.engine == nil {
 		return nil
 	}
 	g := r.engine.Group("/admin/plugin/" + pluginName)
+	if len(r.adminMiddleware) == 0 {
+		g.Use(unwiredStack("admin"))
+		return g
+	}
 	for _, mw := range r.adminMiddleware {
 		g.Use(mw)
 	}
@@ -94,6 +131,10 @@ func (r *routerAdapter) API(pluginName string) *gin.RouterGroup {
 		return nil
 	}
 	g := r.engine.Group("/api/plugin/" + pluginName)
+	if len(r.apiMiddleware) == 0 {
+		g.Use(unwiredStack("API"))
+		return g
+	}
 	for _, mw := range r.apiMiddleware {
 		g.Use(mw)
 	}
