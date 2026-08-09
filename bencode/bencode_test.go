@@ -104,3 +104,109 @@ func sha1sum(s string) string {
 	h := sha1.Sum([]byte(s))
 	return hex.EncodeToString(h[:])
 }
+
+// The encoder and the extra decoders moved here from the tracker plugin, which
+// carried a second copy of this whole package. These goldens are the exact
+// bytes that implementation produced for the same inputs, captured before the
+// move: two encoders that disagree on key order produce different SHA-1s for
+// the same torrent, so "it still compiles" is not the bar — the bytes have to
+// match, or every previously-built .torrent stops matching its swarm.
+func TestBuildOuterDict_ByteIdenticalToTheImplementationItReplaced(t *testing.T) {
+	priv := int64(1)
+	build := func(info []byte, announce string) []byte {
+		return BuildOuterDict([]OuterField{
+			{Key: "announce", Str: announce},
+			{Key: "info", Raw: info},
+			{Key: "private", Int: &priv},
+		})
+	}
+
+	single := []byte("d6:lengthi12345e4:name8:test.mkv12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaae")
+	got := hex.EncodeToString(build(single, "https://private.local/announce/PASSKEY"))
+	const wantSingle = "64383a616e6e6f756e636533383a68747470733a2f2f707269766174652e6c6f63616c2f616e6e6f756e63652f504153534b4559343a696e666f64363a6c656e67746869313233343565343a6e616d65383a746573742e6d6b7631323a7069656365206c656e67746869313633383465363a70696563657332303a616161616161616161616161616161616161616165373a7072697661746569316565"
+	if got != wantSingle {
+		t.Errorf("single-file encoding drifted:\n got %s\nwant %s", got, wantSingle)
+	}
+
+	multi := []byte("d5:filesld6:lengthi100e4:pathl1:a1:beed6:lengthi200e4:pathl1:ceee4:name5:batch12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaae")
+	got = hex.EncodeToString(build(multi, "https://t/announce/K"))
+	const wantMulti = "64383a616e6e6f756e636532303a68747470733a2f2f742f616e6e6f756e63652f4b343a696e666f64353a66696c65736c64363a6c656e6774686931303065343a706174686c313a61313a62656564363a6c656e6774686932303065343a706174686c313a63656565343a6e616d65353a626174636831323a7069656365206c656e67746869313633383465363a70696563657332303a616161616161616161616161616161616161616165373a7072697661746569316565"
+	if got != wantMulti {
+		t.Errorf("multi-file encoding drifted:\n got %s\nwant %s", got, wantMulti)
+	}
+}
+
+// BEP-3 requires bytewise-sorted keys, and the caller's slice must survive the
+// call: fields are built once and reused, so sorting in place would reorder
+// somebody else's data.
+func TestBuildOuterDict_SortsKeysWithoutMutatingTheCaller(t *testing.T) {
+	n := int64(7)
+	fields := []OuterField{
+		{Key: "zebra", Str: "z"},
+		{Key: "announce", Str: "a"},
+		{Key: "middle", Int: &n},
+	}
+	out := string(BuildOuterDict(fields))
+	if out != "d8:announce1:a6:middlei7e5:zebra1:ze" {
+		t.Errorf("unsorted or malformed: %q", out)
+	}
+	if fields[0].Key != "zebra" {
+		t.Errorf("caller's slice was reordered: %q is first", fields[0].Key)
+	}
+}
+
+// An info dict spliced in as Raw must come out byte-for-byte, which is the
+// whole reason the encoder refuses to marshal parsed values.
+func TestBuildOuterDict_SplicedInfoSurvivesHashing(t *testing.T) {
+	info := []byte("d6:lengthi5e4:name1:xe")
+	out := BuildOuterDict([]OuterField{
+		{Key: "announce", Str: "http://x/a"},
+		{Key: "info", Raw: info},
+	})
+	h, err := InfoHash(out)
+	if err != nil {
+		t.Fatalf("InfoHash: %v", err)
+	}
+	if h != sha1.Sum(info) {
+		t.Error("spliced info hashed differently than the raw bytes")
+	}
+}
+
+func TestDecodersOverASpannedDict(t *testing.T) {
+	buf := []byte("d4:infod6:lengthi100e4:name3:abc5:filesl1:a1:beee")
+	top, err := ScanTopDict(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ScanDict(buf, top["info"])
+	if err != nil {
+		t.Fatalf("ScanDict: %v", err)
+	}
+	// ScanDict returns ABSOLUTE coordinates; decoding with the outer buffer is
+	// the contract, and an off-by-span bug here reads a neighbouring field.
+	if s, err := DecodeString(buf, info["name"]); err != nil || string(s) != "abc" {
+		t.Errorf("DecodeString: %q err=%v", s, err)
+	}
+	if n, err := DecodeInt(buf, info["length"]); err != nil || n != 100 {
+		t.Errorf("DecodeInt: %d err=%v", n, err)
+	}
+	elems, err := DecodeList(buf, info["files"])
+	if err != nil || len(elems) != 2 {
+		t.Fatalf("DecodeList: %d elems err=%v", len(elems), err)
+	}
+	if s, _ := DecodeString(buf, elems[1]); string(s) != "b" {
+		t.Errorf("list element 1: %q", s)
+	}
+
+	// Type mismatches are errors, not silent zeros — a tracker that reads a
+	// string as an int would store a length of 0 for a real file.
+	if _, err := DecodeInt(buf, info["name"]); err == nil {
+		t.Error("DecodeInt accepted a string span")
+	}
+	if _, err := DecodeList(buf, info["length"]); err == nil {
+		t.Error("DecodeList accepted an int span")
+	}
+	if _, err := ScanDict(buf, info["files"]); err == nil {
+		t.Error("ScanDict accepted a list span")
+	}
+}
