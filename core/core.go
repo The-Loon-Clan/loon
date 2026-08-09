@@ -130,6 +130,11 @@ type Core struct {
 	viewMu sync.Mutex
 	views  []View
 
+	// Placeable widgets (see widgets.go). Separate from views because a view
+	// declares WHERE it goes and a widget does not — the host places it.
+	widgetMu sync.RWMutex
+	widgets  []Widget
+
 	// access is the site's registration + viewing posture, published by the
 	// host at boot and on every operator toggle. See access.go.
 	access accessState
