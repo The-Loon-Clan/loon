@@ -32,6 +32,12 @@ import (
 // Whitelisted is the variant for fetches whose URL is mediated
 // by an external API whose response is itself constrained to a
 // known host allowlist (anime/manga CDNs, for example).
+// Proxied is the egress-proxy variant this interface always anticipated: a
+// client whose traffic exits through a configured HTTP proxy (the site's
+// VPN egress container), for upstreams that IP-block the server. It carries
+// NO SSRF dial guard — the proxy address is private by nature, and a
+// guarded dialer would refuse it — so it is for trusted, operator-configured
+// destinations only; pin hosts at the URL level in the caller.
 type HTTPClientService interface {
 	API() *http.Client
 	Media() *http.Client
@@ -39,6 +45,7 @@ type HTTPClientService interface {
 	WithTimeout(d time.Duration) *http.Client
 	SafeFetch(timeout time.Duration) *http.Client
 	Whitelisted(timeout time.Duration, hosts ...string) *http.Client
+	Proxied(timeout time.Duration, proxyURL string) (*http.Client, error)
 }
 
 // NewHTTPClient returns the default HTTPClientService
@@ -61,4 +68,7 @@ func (httpClientAdapter) SafeFetch(timeout time.Duration) *http.Client {
 }
 func (httpClientAdapter) Whitelisted(timeout time.Duration, hosts ...string) *http.Client {
 	return httpclient.NewWhitelisted(timeout, hosts...)
+}
+func (httpClientAdapter) Proxied(timeout time.Duration, proxyURL string) (*http.Client, error) {
+	return httpclient.NewProxied(timeout, proxyURL)
 }

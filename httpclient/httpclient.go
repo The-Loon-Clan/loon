@@ -22,6 +22,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -82,6 +83,40 @@ func NewHeavyImport() *http.Client {
 // fits.
 func NewWithTimeout(timeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout, Transport: sharedTransport}
+}
+
+// NewProxied returns a client that routes every request through the given
+// HTTP proxy — the egress-VPN case: an upstream that IP-blocks the server is
+// reached via a proxy container whose traffic leaves through a VPN.
+//
+// The proxy address is typically a PRIVATE address (a compose-network
+// neighbour), which is exactly why this client carries no SSRF dial guard —
+// the guarded dialers would refuse the proxy itself. That makes it a client
+// for TRUSTED, configured destinations only: never hand it a user-supplied
+// URL, and keep any host pinning at the caller (an URL-level check before the
+// fetch), since dial-time checks don't compose with proxying.
+//
+// Bespoke transport (not shared) because the proxy differs per caller.
+func NewProxied(timeout time.Duration, proxyURL string) (*http.Client, error) {
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(u),
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          20,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}, nil
 }
 
 // NewIPv4 returns a client that forces tcp4 dialing — needed for hosts
