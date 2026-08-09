@@ -110,6 +110,20 @@ func (r *Runtime) Plugins() []Plugin {
 	return out
 }
 
+// Core returns the kernel the runtime booted, so a host can reach the
+// registries that outlive boot — views, widgets, extensions — from the one
+// value it already keeps.
+//
+// Read-only in spirit: this is for asking what plugins published, not for
+// registering more after boot. nil-safe like Plugins, because a host that
+// failed to boot still renders an error page.
+func (r *Runtime) Core() *Core {
+	if r == nil {
+		return nil
+	}
+	return r.core
+}
+
 // Stop signals every registered plugin to drain its background
 // work. Plugins are stopped in REVERSE topo order so a plugin
 // can rely on its dependencies still being alive while it
