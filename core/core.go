@@ -100,6 +100,17 @@ type Core struct {
 	// absent rather than silently falling back). See redis.go.
 	Redis RedisService
 
+	// SiteState is what the site is currently willing to do — normal,
+	// read-only, or maintenance. See sitestate.go for why this is a core
+	// concern rather than each plugin's business.
+	//
+	// OPTIONAL, like Redis: a host that has not adopted site state leaves it
+	// nil. Do NOT nil-check it at every call site — use core.SiteWritable(ctx,
+	// c) or core.SiteStateOf(ctx, c), which report SiteNormal for a nil
+	// implementation. That default is deliberate: the contract is fail open, so
+	// an unknown mode must never turn a working request into an error.
+	SiteState SiteStateService
+
 	// Process identifies which process kind this Core was built
 	// for: "web", "worker", or "all" (single-process mode). Boot
 	// uses it to filter plugins (Metadata.Processes); dual-

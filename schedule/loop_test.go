@@ -306,3 +306,57 @@ func TestNextRunTracksTheIntervalTheLoopActuallySleeps(t *testing.T) {
 		"the operator's setting is ignored; 2h means the tick's own guess was left standing",
 		time.Until(job.Snapshot().NextRun).Round(time.Minute))
 }
+
+// The write gate exists so a read-only site stops its own background writers.
+// These pin the three properties that matter: a writing job is held back, a
+// NON-writing job is not, and the default allows everything — because a gate that
+// defaulted to closed would silently stop every job on any host that never
+// installed a hook.
+func TestWriteGate(t *testing.T) {
+	prev := WriteGate
+	defer func() { WriteGate = prev }()
+
+	t.Run("default allows writes", func(t *testing.T) {
+		WriteGate = prev
+		if !WriteGate() {
+			t.Fatal("the default WriteGate must allow writes; fail open is the contract")
+		}
+	})
+
+	t.Run("closed gate holds back a writing job", func(t *testing.T) {
+		WriteGate = func() bool { return false }
+		var ran int
+		reg := &Registry{}
+		job := reg.RegisterJob("wg-writer", "test").MarkWrites()
+		if !job.Writes {
+			t.Fatal("MarkWrites did not set Writes")
+		}
+		// Mirrors the loop's decision without spinning a real loop.
+		if job.Writes && !WriteGate() {
+			// skipped, as intended
+		} else {
+			ran++
+		}
+		if ran != 0 {
+			t.Error("a job flagged MarkWrites ran while the write gate was closed")
+		}
+	})
+
+	t.Run("closed gate does not hold back a read-only job", func(t *testing.T) {
+		WriteGate = func() bool { return false }
+		var ran int
+		reg := &Registry{}
+		job := reg.RegisterJob("wg-reader", "test") // no MarkWrites
+		if job.Writes {
+			t.Fatal("a job that never called MarkWrites reports Writes=true")
+		}
+		if job.Writes && !WriteGate() {
+			// would skip
+		} else {
+			ran++
+		}
+		if ran != 1 {
+			t.Error("a reporting job was held back by the write gate; read-only must not stop reads")
+		}
+	})
+}

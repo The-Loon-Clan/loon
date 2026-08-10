@@ -11,6 +11,9 @@
 // core.Deps and (optionally) installing the package hooks:
 //
 //   - OffPeakGate       — "is the site quiet enough to run now?"
+//   - WriteGate         — "may a job that MUTATES run right now?"
+//     (false while the site is read-only; pairs with
+//     JobInfo.MarkWrites)
 //   - IntervalOverride  — per-job interval override (loop.go)
 //   - PanicSink         — persistent error reporting (loop.go)
 //   - LogSink           — mirror job log lines to the host logger
@@ -51,7 +54,10 @@ type JobInfo struct {
 	// while site traffic is above the configured threshold. Set via
 	// MarkOffPeak after registration. Useful for cleanup-y jobs the
 	// operator wants pushed to quiet hours.
-	OffPeak     bool
+	OffPeak bool
+	// Writes: this job mutates persistent state, so run loops hold it back
+	// while the site is read-only. Set via MarkWrites at registration.
+	Writes      bool
 	Status      string // "idle", "running", "error", "paused"
 	LastRun     time.Time
 	NextRun     time.Time
@@ -148,6 +154,23 @@ var CPUMaxPercent float64 = 0
 // instead of running now.
 var OffPeakGate = func() bool { return true }
 
+// WriteGate is a swappable hook the run loops call to ask "may a job that
+// MUTATES run right now?". The host installs one that reports false while the
+// site is read-only; the default allows everything, so a host that has not
+// adopted site state behaves exactly as before.
+//
+// This hook is the reason site state is a framework concern. A read-only mode
+// enforced only at the HTTP layer stops members from posting and does nothing
+// about the six-job crawler pipeline still writing — and during a migration that
+// copies from a live database, a background writer is the failure that leaves no
+// trace, because everything committed after the dump's snapshot is lost at
+// cutover without an error anywhere.
+//
+// Default true, and deliberately so: the contract everywhere in site state is
+// fail open. A gate that defaulted to false would silently stop every job on any
+// host that never installed it.
+var WriteGate = func() bool { return true }
+
 // LogSink, when non-nil, receives every job log line in addition to
 // the job's in-memory ring buffer. Hosts install it to mirror job
 // activity into their structured logger / stdout.
@@ -202,6 +225,23 @@ func RegisterService(name, description string) *JobInfo {
 // execution.
 func (j *JobInfo) MarkOffPeak() *JobInfo {
 	j.OffPeak = true
+	return j
+}
+
+// MarkWrites declares that this job MUTATES persistent state, so run loops can
+// hold it back while the site is read-only (see WriteGate).
+//
+// Declare it at registration, next to MarkOffPeak, and declare it generously:
+// the cost of flagging a read-only job by mistake is that it pauses during a
+// maintenance window, and the cost of MISSING one is a write landing in a
+// database that is being copied out from under it — lost at cutover, silently,
+// because a dump's snapshot is taken at its start.
+//
+// Most jobs in a real system write. The crawler writes, the cleanup jobs delete,
+// the cache jobs write cache tables. The ones that genuinely do not are the
+// reporting and alerting jobs.
+func (j *JobInfo) MarkWrites() *JobInfo {
+	j.Writes = true
 	return j
 }
 

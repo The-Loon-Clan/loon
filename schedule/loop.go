@@ -80,6 +80,15 @@ func ServiceLoop(ctx context.Context, job *JobInfo, initialDelay, defaultInterva
 			job.Log("Skipped: paused by admin")
 		} else if job.OffPeak && !OffPeakGate() {
 			job.Log("Skipped: site is busy (off-peak gate)")
+		} else if job.Writes && !WriteGate() {
+			// Read-only gate. Ahead of the tick rather than inside it, for the
+			// same reason the pause gate is: it then covers EVERY loop-driven
+			// job that declared MarkWrites, including the ones whose authors
+			// never heard of site state. A background writer during a migration
+			// that copies from a live database is the failure that leaves no
+			// trace — the dump's snapshot is taken at its start, so anything
+			// committed afterwards is lost at cutover with nothing logged.
+			job.Log("Skipped: site is read-only (write gate)")
 		} else {
 			runTickProtected(ctx, job, tickFn, h.OnPanic)
 		}
