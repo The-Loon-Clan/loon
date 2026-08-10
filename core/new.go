@@ -38,6 +38,13 @@ type Deps struct {
 	// Redis. New does not validate it (see Core.Redis). Set it via
 	// core.NewRedis(client) when the host runs Redis.
 	Redis RedisService
+
+	// SiteState is the second OPTIONAL dep: what the site is currently willing
+	// to do (normal / read-only / maintenance). Leave it nil on a host that has
+	// not adopted site state — core.SiteWritable and core.SiteStateOf report
+	// SiteNormal for a nil implementation, which is both true for that host and
+	// the fail-open answer. New does not validate it. See sitestate.go.
+	SiteState SiteStateService
 }
 
 // New validates d and assembles the Core mediator. It fails loud:
@@ -89,6 +96,7 @@ func New(d Deps) (*Core, error) {
 		Entitlements:  d.Entitlements,
 		HTTPClient:    d.HTTPClient,
 		Errors:        d.Errors,
-		Redis:         d.Redis, // optional — may be nil
+		Redis:         d.Redis,     // optional — may be nil
+		SiteState:     d.SiteState, // optional — may be nil; see sitestate.go
 	}, nil
 }
