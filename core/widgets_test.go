@@ -154,3 +154,34 @@ func TestWidgetItemCarriesKindAndIsAbsentByDefault(t *testing.T) {
 		t.Error("a zero id was reported as an item")
 	}
 }
+
+// A setting belongs to the PLACEMENT, not the widget: a notice in the footer
+// and the same widget in a sidebar are two different notices, and one shared
+// value would make the second placement useless.
+func TestWidgetConfigIsPerPlacementAndAbsentByDefault(t *testing.T) {
+	c, _ := gin.CreateTestContext(nil)
+	if got := WidgetConfig(c); got != "" {
+		t.Errorf("unset config = %q, want empty", got)
+	}
+	SetWidgetConfig(c, "## Notice")
+	if got := WidgetConfig(c); got != "## Notice" {
+		t.Errorf("config = %q, want %q", got, "## Notice")
+	}
+	// Rendering a second placement must not inherit the first one's value.
+	c2, _ := gin.CreateTestContext(nil)
+	if got := WidgetConfig(c2); got != "" {
+		t.Errorf("a fresh render saw %q; config leaked between placements", got)
+	}
+}
+
+func TestTakesConfigFollowsTheLabel(t *testing.T) {
+	plain := testWidget("plain")
+	if plain.TakesConfig() {
+		t.Error("a widget with no ConfigLabel offered a settings field")
+	}
+	cfg := testWidget("cfg")
+	cfg.ConfigLabel = "Text"
+	if !cfg.TakesConfig() {
+		t.Error("a widget with a ConfigLabel was not offered a settings field")
+	}
+}

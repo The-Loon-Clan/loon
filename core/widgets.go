@@ -68,11 +68,32 @@ type Widget struct {
 	// always wins over it.
 	Weight int
 
+	// ConfigLabel, when non-empty, declares that this widget takes a per-
+	// PLACEMENT setting and labels the field an operator types it into.
+	//
+	// Per placement, not per widget, is the whole point: a text widget in the
+	// footer and the same text widget in a sidebar are two different notices,
+	// and one shared value would make the second placement useless. The host
+	// stores the string against (region, slug) and hands it back through
+	// WidgetConfig at render.
+	//
+	// A plain string rather than a schema. Anything richer means the editor
+	// growing a form builder, and the widgets that actually want configuring —
+	// a notice, a heading, a feed url — want one value.
+	ConfigLabel string
+	// ConfigHint is placeholder text under the field: what to type, and what
+	// happens if it is left blank.
+	ConfigHint string
+
 	// Render returns an HTML fragment. Returning ("", nil) is the correct way
 	// to say "nothing to show here" — a host drops the widget entirely rather
 	// than drawing an empty box around it.
 	Render func(c *gin.Context) (template.HTML, error)
 }
+
+// TakesConfig reports whether an operator should be offered a setting field
+// for this widget.
+func (w Widget) TakesConfig() bool { return w.ConfigLabel != "" }
 
 // AllowsUser reports whether u (nil = anonymous) may see the widget.
 func (w Widget) AllowsUser(u *User) bool {
@@ -154,7 +175,30 @@ func (c *Core) WidgetBySlug(slug string) (Widget, bool) {
 // release, a torrent, a forum thread. The host sets it before rendering a
 // region; a widget that finds nothing renders nothing.
 
-const ctxWidgetItem = "loon.widget.item"
+const (
+	ctxWidgetItem   = "loon.widget.item"
+	ctxWidgetConfig = "loon.widget.config"
+)
+
+// SetWidgetConfig records the setting stored for the placement being rendered.
+// Hosts call this immediately before a widget's Render.
+func SetWidgetConfig(c *gin.Context, cfg string) { c.Set(ctxWidgetConfig, cfg) }
+
+// WidgetConfig returns the setting an operator typed for THIS placement, or ""
+// when there is none.
+//
+// A widget must treat "" as "not configured" and render nothing, rather than
+// falling back to a built-in default: an operator who cleared the field meant
+// to clear it, and a widget that quietly reverts to sample text is one nobody
+// can turn off.
+func WidgetConfig(c *gin.Context) string {
+	v, ok := c.Get(ctxWidgetConfig)
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
 
 // WidgetItemRef identifies what a page is about, for widgets rendered on it.
 //
