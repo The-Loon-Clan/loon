@@ -578,6 +578,25 @@ func (r *Registry) TriggerJob(name string) bool {
 	status := found.Status
 	r.mu.RUnlock()
 
+	// A manual trigger is still a WRITE if the job writes.
+	//
+	// The write gate lives in ServiceLoop, ahead of the scheduled tick — so it
+	// covers the cron path and nothing else. A "Run now" click on /admin/jobs, or an
+	// ops-API trigger, called fn() directly and ran the job regardless. During a
+	// migration that copies from a live database that is one click away from writing
+	// into a cluster being replaced, with the rows discarded at cutover and nothing
+	// logged. An adversarial review found it; the gate was genuinely only half
+	// installed.
+	//
+	// Deliberately NOT extended to the off-peak gate: a manual trigger overriding
+	// off-peak is the documented, useful behaviour ("I know it is busy, run it
+	// anyway"). Read-only is different in kind — it is not a preference about
+	// timing, it is a statement that writes must not happen at all.
+	if fn != nil && found.Writes && !WriteGate() {
+		found.Log("Manual trigger REFUSED: the site is read-only (write gate)")
+		return false
+	}
+
 	if fn != nil && status != "running" {
 		fn()
 		return true
