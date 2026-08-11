@@ -54,5 +54,6 @@ func (c coreJob) SetIdle(next time.Time)         { c.j.SetIdle(next) }
 func (c coreJob) SetError(msg string)            { c.j.SetError(msg) }
 func (c coreJob) Log(format string, args ...any) { c.j.Log(format, args...) }
 func (c coreJob) MarkOffPeak() core.Job          { c.j.MarkOffPeak(); return c }
+func (c coreJob) MarkWrites() core.Job           { c.j.MarkWrites(); return c }
 func (c coreJob) SetTrigger(fn func())           { c.j.SetTrigger(fn) }
 func (c coreJob) IsPaused() bool                 { return c.j.IsPaused() }

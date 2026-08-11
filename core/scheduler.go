@@ -49,6 +49,15 @@ type Job interface {
 	// site traffic is above the admin-configured threshold.
 	// Returns the same Job for chained configuration.
 	MarkOffPeak() Job
+	// MarkWrites declares that this job MUTATES persistent state,
+	// so scheduled runs are held back while the site is read-only
+	// (see schedule.WriteGate). Returns the same Job for chaining.
+	//
+	// Declare it generously. Flagging a read-only job by mistake
+	// costs a pause during a maintenance window; MISSING one costs
+	// data, because a write landing during a migration's copy is
+	// lost at cutover with nothing logged anywhere.
+	MarkWrites() Job
 	// SetTrigger installs the manual-run callback the admin
 	// /admin/jobs "run now" button fires. Manual triggers bypass
 	// the off-peak gate.
@@ -101,5 +110,6 @@ func (noopJob) SetIdle(time.Time)  {}
 func (noopJob) SetError(string)    {}
 func (noopJob) Log(string, ...any) {}
 func (noopJob) MarkOffPeak() Job   { return noopJob{} }
+func (noopJob) MarkWrites() Job    { return noopJob{} }
 func (noopJob) SetTrigger(func())  {}
 func (noopJob) IsPaused() bool     { return false }
