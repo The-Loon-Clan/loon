@@ -406,7 +406,25 @@ type MessageOverview struct {
 	References    []string  // Message-Id's of referenced messages (References header value, split on spaces). Empty if the header is missing.
 	Bytes         int       // Message size in bytes, called :bytes metadata item in RFC3977.
 	Lines         int       // Message size in lines, called :lines metadata item in RFC3977.
-	Extra         []string  // Any additional fields returned by the server.
+	Extra         []string  // Any additional fields returned by the server, tab-separated.
+	// Xref is the server's own record of which newsgroups it filed this article
+	// into, and at which article number in each: "server grp.a:123 grp.b:456".
+	// Empty when the server does not include it in overview.
+	//
+	// RFC 5536 s3.2.14 defines the header, and says user agents use it "to avoid
+	// multiple processing of crossposted articles" — which is exactly what an
+	// indexer wants, because a crosspost is ONE article filed under several
+	// groups (RFC 5536 s1.5) and crawling those groups separately otherwise
+	// yields it once per group with no way to tell.
+	//
+	// It arrives as an ordinary extra overview field. The RFC 3977 s8.4
+	// convention is that a field listed in LIST OVERVIEW.FMT with a ":full"
+	// suffix carries its own header name inline, and Xref is conventionally
+	// listed as "Xref:full" — INN requires it and will not start without it. So
+	// the value is self-identifying and can be recognised by prefix without
+	// consulting the format at all, which is what parseOverview does. Use
+	// OverviewFmt only to diagnose a server that does not send it.
+	Xref string
 }
 
 // OverviewStats accounts for every line an OVER response carried versus what
@@ -494,7 +512,21 @@ func (c *Conn) OverviewWithStats(begin, end int) ([]MessageOverview, int64, Over
 		if err != nil {
 			overview.Lines = 0 // non-fatal
 		}
-		overview.Extra = append([]string{}, ss[8:]...)
+		if len(ss) > 8 && ss[8] != "" {
+			// ss[8] is everything past the eight mandatory fields, still
+			// tab-joined because SplitN stopped there. Split it properly so a
+			// caller can see individual extra fields rather than one blob.
+			overview.Extra = strings.Split(ss[8], "	")
+			for _, f := range overview.Extra {
+				// Case-insensitive: the header name is "Xref" but servers are
+				// not required to match case, and a mismatch here silently
+				// disables crosspost detection rather than failing loudly.
+				if len(f) >= 5 && strings.EqualFold(f[:5], "xref:") {
+					overview.Xref = strings.TrimSpace(f[5:])
+					break
+				}
+			}
+		}
 		result = append(result, overview)
 	}
 	stats.Parsed = len(result)
@@ -529,6 +561,37 @@ func (c *Conn) Capabilities() ([]string, error) {
 		return nil, err
 	}
 	return c.readStrings()
+}
+
+// OverviewFmt returns the server's overview field order (LIST OVERVIEW.FMT,
+// RFC 3977 s8.4) — the names of the fields OVER emits, in order.
+//
+// It exists to answer one operational question that is otherwise unanswerable:
+// does this provider include Xref in overview? Xref is how a crosspost can be
+// recognised without fetching the article twice, and a provider that omits it
+// silently degrades an indexer to per-group duplicates with nothing to see. The
+// parser does not need this — a ":full" field carries its own header name, so
+// MessageOverview.Xref is populated by prefix — but "the field is absent"
+// and "our parser missed it" look identical without asking the server directly.
+//
+// The response conventionally omits the first seven mandatory fields or lists
+// them explicitly depending on the server, so callers should look for the NAME
+// they care about rather than assuming a column index.
+func (c *Conn) OverviewFmt() ([]string, error) {
+	if _, _, err := c.cmd(215, "LIST OVERVIEW.FMT"); err != nil {
+		return nil, err
+	}
+	lines, err := c.readStrings()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if l = strings.TrimSpace(l); l != "" {
+			out = append(out, l)
+		}
+	}
+	return out, nil
 }
 
 // Date returns the current time on the server.
