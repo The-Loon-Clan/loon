@@ -166,7 +166,40 @@ func (c *Core) Lookup(name string) (any, bool) {
 	c.extMu.Lock()
 	defer c.extMu.Unlock()
 	svc, ok := c.ext[name]
+	if !ok {
+		// Record the miss. A capability a plugin asks for and nobody
+		// registers is the quietest failure this architecture has: the
+		// plugin degrades to doing nothing, which is indistinguishable
+		// from having nothing to do.
+		//
+		// It has now happened five times across different plugins, and
+		// each time it was found by somebody noticing a feature was
+		// missing rather than by anything reporting it. Counting misses
+		// here rather than in each plugin is the point -- the registry is
+		// the one place that knows the answer for every plugin at once.
+		if c.extMisses == nil {
+			c.extMisses = map[string]int{}
+		}
+		c.extMisses[name]++
+	}
 	return svc, ok
+}
+
+// MissingExtensions returns the capability names that were looked up and
+// never found, sorted, with how many times each was asked for.
+//
+// Read after boot to report what a host did not wire. A non-empty result is
+// not necessarily a fault -- optional capabilities exist and a host may
+// legitimately decline them -- but it should never be a SURPRISE, which is
+// exactly what it has been every time so far.
+func (c *Core) MissingExtensions() map[string]int {
+	c.extMu.Lock()
+	defer c.extMu.Unlock()
+	out := make(map[string]int, len(c.extMisses))
+	for k, v := range c.extMisses {
+		out[k] = v
+	}
+	return out
 }
 
 // ExtensionNames returns a sorted snapshot of every registered

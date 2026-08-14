@@ -128,6 +128,9 @@ type Core struct {
 	// read of the value a consumer wants, and so Register (name, svc) can go
 	// on being the whole API for anyone who does not care.
 	extDefs map[string]ExtensionDef
+	// extMisses counts capability lookups that found nothing, by name.
+	// Guarded by extMu with the maps above. See Core.MissingExtensions.
+	extMisses map[string]int
 
 	// events is the announcement bus — see events.go. Separate from the
 	// extension registry because the direction of knowledge is opposite: an

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 )
 
 // Boot is the single entry point cmd/main.go calls after the
@@ -87,6 +88,34 @@ func Boot(ctx context.Context, c *Core) (*Runtime, error) {
 
 	if len(plugins) > 0 {
 		log.Printf("core: %d plugin(s) booted", len(plugins))
+	}
+
+	// Report every capability a plugin asked for and did not get.
+	//
+	// This is the quietest failure the plugin architecture has. A consumer
+	// that cannot find its provider degrades to doing nothing, and doing
+	// nothing looks exactly like having nothing to do -- so the feature is
+	// absent, no error is raised, and it is found weeks later by somebody
+	// noticing it never worked. That has now happened five times.
+	//
+	// Not fatal, because optional capabilities are a real and useful thing:
+	// a host may decline one deliberately, and a plugin that degrades
+	// cleanly is behaving correctly. The fault is not the absence, it is
+	// the SILENCE. One line at boot is the whole fix.
+	//
+	// Metadata.Requires already covers the hard dependencies -- those fail
+	// the topo sort before reaching here. This is for the soft ones, which
+	// by construction nothing else checks.
+	if missing := c.MissingExtensions(); len(missing) > 0 {
+		names := make([]string, 0, len(missing))
+		for n := range missing {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			log.Printf("core: capability %q was requested but nobody registered it "+
+				"— any plugin depending on it is running degraded", n)
+		}
 	}
 	return &Runtime{plugins: plugins, core: c}, nil
 }
