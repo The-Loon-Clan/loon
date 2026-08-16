@@ -55,6 +55,10 @@ type Conn struct {
 	r       *bufio.Reader
 	br      *bodyReader
 	close   bool
+	// overCmd remembers which overview verb this server answers, so the
+	// fallback below is paid once per connection instead of once per batch.
+	// "" until the first Overview call decides.
+	overCmd string
 }
 
 // SetDeadline sets a read/write deadline on the underlying connection.
@@ -459,11 +463,33 @@ func (c *Conn) Overview(begin, end int) ([]MessageOverview, int64, error) {
 // OverviewWithStats is Overview plus the parse accounting.
 func (c *Conn) OverviewWithStats(begin, end int) ([]MessageOverview, int64, OverviewStats, error) {
 	var stats OverviewStats
-	if _, _, err := c.cmd(224, "OVER %d-%d", begin, end); err != nil {
-		// Fall back to XOVER for servers that predate RFC 3977
-		if _, _, err2 := c.cmd(224, "XOVER %d-%d", begin, end); err2 != nil {
+	// Which verb this server answers is a property of the SERVER, so it is
+	// decided once and remembered. Probing per call is not free: a server that
+	// implements only XOVER (frugalusenet does not implement OVER) answered a
+	// failed OVER before every single batch, and the crawler issues up to
+	// 20,000 batches a round.
+	switch c.overCmd {
+	case "OVER", "XOVER":
+		if _, _, err := c.cmd(224, c.overCmd+" %d-%d", begin, end); err != nil {
 			return nil, 0, stats, err
 		}
+	default:
+		_, _, err := c.cmd(224, "OVER %d-%d", begin, end)
+		if err == nil {
+			c.overCmd = "OVER"
+			break
+		}
+		// Fall back to XOVER for servers that predate RFC 3977.
+		_, _, err2 := c.cmd(224, "XOVER %d-%d", begin, end)
+		if err2 != nil {
+			// BOTH errors, and err2 first. Returning only the OVER error --
+			// which is what this did -- reports "500 command unimplemented" on
+			// a server that simply does not implement OVER, hiding whatever
+			// XOVER actually said. That is the error an operator has to
+			// diagnose from, and it was never visible.
+			return nil, 0, stats, fmt.Errorf("overview failed: XOVER: %w (OVER: %v)", err2, err)
+		}
+		c.overCmd = "XOVER"
 	}
 
 	lines, err := c.readStrings()
