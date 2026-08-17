@@ -19,6 +19,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -32,6 +33,25 @@ type Store interface {
 	// Remove deletes the named file. Removing a file that does not
 	// exist is not an error — the caller's intent (name gone) holds.
 	Remove(ctx context.Context, name string) error
+
+	// List returns the stored names under prefix (a directory-style
+	// namespace like "achievement-badges/"), each usable with Save and
+	// Remove, alongside its public URL. An empty prefix lists everything,
+	// which a caller should think twice about wanting.
+	//
+	// Added for "pick an existing image" controls: without it every
+	// upload UI could only ever add, and re-using an image meant
+	// re-uploading it under a second name. Order is lexical, for stable
+	// dropdowns rather than filesystem luck.
+	List(ctx context.Context, prefix string) ([]Entry, error)
+}
+
+// Entry is one stored file, as List reports it.
+type Entry struct {
+	// Name is the store-relative name (what Save took, what Remove takes).
+	Name string
+	// URL is the public path the host serves it under.
+	URL string
 }
 
 // ImageExts maps the sniffed MIME types accepted for user image
@@ -153,4 +173,43 @@ func cleanName(name string) (string, error) {
 		return "", fmt.Errorf("blob: invalid name %q", name)
 	}
 	return clean, nil
+}
+
+// List walks root/prefix, reporting each regular file store-relative.
+// A missing prefix directory is an empty listing, not an error — asking
+// "what is here" about a namespace nobody has written to has an answer.
+func (l *Local) List(ctx context.Context, prefix string) ([]Entry, error) {
+	clean := ""
+	if prefix != "" {
+		c, err := cleanName(strings.TrimSuffix(prefix, "/"))
+		if err != nil {
+			return nil, err
+		}
+		clean = c
+	}
+	dir := filepath.Join(l.root, filepath.FromSlash(clean))
+	var out []Entry
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(l.root, path)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(rel)
+		out = append(out, Entry{Name: name, URL: l.urlPrefix + name})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("blob: list %q: %w", prefix, err)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }

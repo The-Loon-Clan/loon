@@ -135,3 +135,33 @@ func TestLocalRejectsHostileNames(t *testing.T) {
 		t.Fatal("a hostile name escaped the store root")
 	}
 }
+
+// List reports what Save stored, under the asked-for namespace only, in a
+// stable order — and an unwritten namespace is an empty answer, not an error.
+func TestListReportsSavedFilesUnderPrefix(t *testing.T) {
+	dir := t.TempDir()
+	l := NewLocal(dir, "/uploads")
+	ctx := context.Background()
+	for _, name := range []string{"badges/b.png", "badges/a.png", "covers/c.png"} {
+		if _, err := l.Save(ctx, name, []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := l.List(ctx, "badges/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Name != "badges/a.png" || got[1].Name != "badges/b.png" {
+		t.Fatalf("List(badges/) = %+v; want a.png then b.png, covers excluded", got)
+	}
+	if got[0].URL != "/uploads/badges/a.png" {
+		t.Fatalf("URL = %q", got[0].URL)
+	}
+	if empty, err := l.List(ctx, "nothing-here/"); err != nil || len(empty) != 0 {
+		t.Fatalf("unwritten namespace: %v, %v; want empty, nil", empty, err)
+	}
+	// Traversal stays refused at the same boundary Save uses.
+	if _, err := l.List(ctx, "../"); err == nil {
+		t.Fatal("List accepted a traversal prefix")
+	}
+}
