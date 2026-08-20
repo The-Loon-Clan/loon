@@ -222,6 +222,12 @@ func pluginSuitsFlavour(md Metadata, siteFlavours []string) bool {
 		return true
 	}
 	for _, want := range md.Flavours {
+		// The explicit "either half" answer, which a plugin gives instead of
+		// leaving the field empty — see FlavourAny on why absence is not a
+		// good enough way to say it.
+		if want == FlavourAny {
+			return true
+		}
 		for _, have := range siteFlavours {
 			if want == have {
 				return true

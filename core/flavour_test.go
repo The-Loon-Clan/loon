@@ -8,6 +8,7 @@ func TestPluginSuitsFlavour(t *testing.T) {
 	indexerOnly := Metadata{Name: "usenet", Flavours: []string{FlavourIndexer}}
 	trackerOnly := Metadata{Name: "hitrun", Flavours: []string{FlavourTracker}}
 	either := Metadata{Name: "forum"}
+	anyDeclared := Metadata{Name: "store", Flavours: []string{FlavourAny}}
 	both := Metadata{Name: "search", Flavours: []string{FlavourIndexer, FlavourTracker}}
 
 	indexerSite := []string{FlavourIndexer}
@@ -25,6 +26,13 @@ func TestPluginSuitsFlavour(t *testing.T) {
 		// the site indexes.
 		{"undeclared on an indexer", either, indexerSite, true},
 		{"undeclared on a tracker", either, trackerSite, true},
+
+		// The same answer, said out loud. Both run everywhere; the difference
+		// is that one of them has been decided and the other has only been
+		// left alone, and only a declaration can tell a reviewer which.
+		{"any on an indexer", anyDeclared, indexerSite, true},
+		{"any on a tracker", anyDeclared, trackerSite, true},
+		{"any on a both site", anyDeclared, bothSite, true},
 
 		{"indexer plugin on an indexer site", indexerOnly, indexerSite, true},
 		{"indexer plugin on a tracker site", indexerOnly, trackerSite, false},

@@ -89,10 +89,18 @@ type Metadata struct {
 	Processes []string
 
 	// Flavours lists which HALVES of a site this plugin belongs
-	// to: FlavourIndexer, FlavourTracker, or both. Empty means
-	// "any", which is the right answer for most plugins — a
-	// forum, a shop and a points ledger do not care what the
-	// site indexes.
+	// to: FlavourIndexer, FlavourTracker, or FlavourAny for the
+	// majority that do not care — a forum, a shop, a points
+	// ledger.
+	//
+	// SAY IT even when the answer is "any". Empty runs everywhere
+	// too and always will, because a plugin compiled against an
+	// older core has no field to fill in — but that leaves
+	// absence meaning two things at once, "belongs to both" and
+	// "nobody has thought about it", and only one of them is a
+	// decision. loon-plugins CHECKLIST.md section 1 requires the
+	// field; scripts/audit_flavours.py finds the ones that
+	// skipped it.
 	//
 	// Boot skips plugins whose Flavours share nothing with the
 	// booting Core's Flavours, exactly as it does for Processes,
@@ -120,6 +128,17 @@ type Metadata struct {
 const (
 	FlavourIndexer = "indexer"
 	FlavourTracker = "tracker"
+
+	// FlavourAny says "either half, I do not care" — a forum, a shop, a
+	// points ledger.
+	//
+	// It exists so that ANSWER is sayable. An empty Flavours also runs
+	// everywhere and always will, because out-of-tree plugins compiled
+	// against an older core have no field to fill in — but that makes
+	// absence mean two things at once, "I belong to both" and "nobody has
+	// thought about it", and those want telling apart. A plugin that has
+	// decided says so; anything still empty is a plugin nobody has asked.
+	FlavourAny = "any"
 )
 
 // Factory constructs a fresh Plugin instance. Caddy-style:
