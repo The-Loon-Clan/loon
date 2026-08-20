@@ -20,6 +20,13 @@ type Deps struct {
 	// "worker", or "all". Drives Boot's plugin filter.
 	Process string
 
+	// Flavours is which HALVES this deployment runs — FlavourIndexer,
+	// FlavourTracker, or both. Drives Boot's other plugin filter
+	// (Metadata.Flavours). OPTIONAL: leave it nil and every plugin
+	// runs, which is what a host that has never heard of flavours
+	// gets and must keep getting.
+	Flavours []string
+
 	Users         UsersService
 	Auth          AuthService
 	RBAC          RBACService
@@ -83,6 +90,7 @@ func New(d Deps) (*Core, error) {
 	}
 	return &Core{
 		Process:       d.Process,
+		Flavours:      d.Flavours,
 		Users:         d.Users,
 		Auth:          d.Auth,
 		RBAC:          d.RBAC,
