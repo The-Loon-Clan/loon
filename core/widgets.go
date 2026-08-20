@@ -174,6 +174,21 @@ func (c *Core) Widgets() []Widget {
 	return out
 }
 
+// AllWidgets returns every registered widget INCLUDING the ones a switched-off
+// feature hides.
+//
+// The counterpart to AllViews, and for the one caller that needs it: an admin
+// page naming what a feature toggle governs has to list a widget whether it is
+// currently on or off, which is precisely what Widgets refuses to do.
+func (c *Core) AllWidgets() []Widget {
+	c.widgetMu.RLock()
+	defer c.widgetMu.RUnlock()
+	out := make([]Widget, len(c.widgets))
+	copy(out, c.widgets)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Weight < out[j].Weight })
+	return out
+}
+
 // WidgetBySlug finds one widget. Hosts resolve stored placements through this,
 // so a placement naming a widget that is no longer registered — a plugin
 // switched off since — reports missing rather than rendering something else.
