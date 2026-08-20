@@ -191,6 +191,37 @@ const ctxViewSubject = "loon.view.subject"
 // views. Hosts call this in their profile handler.
 func SetViewSubject(c *gin.Context, userID int64) { c.Set(ctxViewSubject, userID) }
 
+// ctxPublicProfile marks a render as the PUBLIC profile — the page that
+// answers "what do other members see" — as opposed to the account-settings
+// profile, where the same widgets are the member's own controls.
+const ctxPublicProfile = "loon.view.publicProfile"
+
+// SetPublicProfile marks this render as the public profile. Hosts set it on
+// the /u/<username> path and nowhere else.
+//
+// It exists because a SlotUserWidget renders on BOTH profile pages, and the
+// self-only widgets among them -- an agent fleet roster, an IRC verification
+// token, anything carrying a control rather than a fact -- are correct on the
+// settings page and wrong on the public one. Their existing viewer==subject
+// check cannot tell the two apart: the owner passes it on both.
+//
+// Nothing here is a security boundary. The viewer==subject check is what stops
+// a stranger seeing those cards, and it still does. This only stops the OWNER
+// being shown their own private controls on the page whose purpose is to show
+// them what everybody else sees.
+func SetPublicProfile(c *gin.Context) { c.Set(ctxPublicProfile, true) }
+
+// IsPublicProfile reports whether this render is the public profile. Plugins
+// whose widget is a control rather than a fact return empty when it is true.
+func IsPublicProfile(c *gin.Context) bool {
+	v, ok := c.Get(ctxPublicProfile)
+	if !ok {
+		return false
+	}
+	b, _ := v.(bool)
+	return b
+}
+
 // ViewSubject returns the user id whose profile is being rendered. Plugins
 // call this inside a user.widget / user.tab Render.
 func ViewSubject(c *gin.Context) (int64, bool) {
