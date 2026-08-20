@@ -118,6 +118,17 @@ type Core struct {
 	// their surfaces to wire.
 	Process string
 
+	// Flavours is which HALVES of a site this deployment runs:
+	// FlavourIndexer, FlavourTracker, or both. Boot uses it to
+	// filter plugins (Metadata.Flavours).
+	//
+	// EMPTY MEANS EVERY FLAVOUR, so a host that has never heard
+	// of flavours keeps every plugin it had. That default is
+	// load-bearing rather than polite: the alternative is a field
+	// arriving in a shared core and silently switching off half
+	// of somebody's site at the next build.
+	Flavours []string
+
 	// Extension registry (see extensions.go): the cross-plugin
 	// service directory behind Register/Lookup. Lazily
 	// initialised so &Core{} test literals stay valid.

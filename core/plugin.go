@@ -87,7 +87,40 @@ type Metadata struct {
 	// booting Core's Process (an "all"-process Core runs
 	// everything).
 	Processes []string
+
+	// Flavours lists which HALVES of a site this plugin belongs
+	// to: FlavourIndexer, FlavourTracker, or both. Empty means
+	// "any", which is the right answer for most plugins — a
+	// forum, a shop and a points ledger do not care what the
+	// site indexes.
+	//
+	// Boot skips plugins whose Flavours share nothing with the
+	// booting Core's Flavours, exactly as it does for Processes,
+	// and for the same reason: a plugin that has no business
+	// running here should not be provisioned, mount routes, or
+	// start jobs. A tracker's hit-and-run enforcement on a site
+	// with no torrents is not merely useless — it has an admin
+	// page, a nightly sweep and warnings to issue, all about a
+	// swarm that does not exist.
+	//
+	// Declared BY THE PLUGIN rather than listed by the host,
+	// which is the whole point. A host that keeps the list keeps
+	// it wrong: it has to know that hitrun, seedlock and perks
+	// are tracker plugins, and the day somebody writes a fourth
+	// the host does not know about it. A plugin already knows
+	// what it is.
+	Flavours []string
 }
+
+// The halves a site can have. A deployment is one, the other, or
+// both, and Core.Flavours carries the set that is ON — which is
+// why "both" is not a third constant here: it is the two-element
+// set, and treating it as a value of its own is how every caller
+// grows a three-way switch.
+const (
+	FlavourIndexer = "indexer"
+	FlavourTracker = "tracker"
+)
 
 // Factory constructs a fresh Plugin instance. Caddy-style:
 // registration captures a constructor, not the value itself, so

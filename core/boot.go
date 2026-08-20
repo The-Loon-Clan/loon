@@ -66,6 +66,25 @@ func Boot(ctx context.Context, c *Core) (*Runtime, error) {
 		}
 		plugins = kept
 	}
+	// ...and drop plugins that do not belong to this site's flavour
+	// (Metadata.Flavours vs Core.Flavours). Same placement and same
+	// reasoning as the process filter above: after the topo-sort, so a
+	// Requires edge onto a skipped plugin still validates as a graph.
+	//
+	// An empty Core.Flavours means every flavour — see
+	// pluginSuitsFlavour, which owns that rule.
+	{
+		kept := plugins[:0]
+		for _, p := range plugins {
+			if pluginSuitsFlavour(p.Metadata(), c.Flavours) {
+				kept = append(kept, p)
+			} else {
+				log.Printf("core: plugin %s skipped (belongs to %v, this site is %v)",
+					p.Metadata().Name, p.Metadata().Flavours, c.Flavours)
+			}
+		}
+		plugins = kept
+	}
 
 	// Step 3: provision. Fail fast — a half-wired plugin set
 	// gives unpredictable behaviour at request time.
@@ -182,6 +201,34 @@ func effectiveProcesses(md Metadata) []string {
 		return []string{"web"}
 	}
 	return md.Processes
+}
+
+// pluginSuitsFlavour reports whether a plugin belongs on a site
+// running these halves.
+//
+// A plugin that declares NOTHING suits every site — the common
+// case by a distance, since a forum, a shop and a points ledger
+// do not care what the site indexes. A plugin that declares some
+// runs when ANY of them is on, which is what makes "both" fall
+// out rather than being a case: a tracker plugin on a site
+// running indexer+tracker matches on the second element.
+func pluginSuitsFlavour(md Metadata, siteFlavours []string) bool {
+	// A host that declares NO flavours keeps every plugin it had.
+	// The guard lives here rather than at the one call site so the
+	// rule is in one place and a second caller cannot forget it —
+	// which is exactly what the first version did, and a test
+	// caught before it ever ran.
+	if len(md.Flavours) == 0 || len(siteFlavours) == 0 {
+		return true
+	}
+	for _, want := range md.Flavours {
+		for _, have := range siteFlavours {
+			if want == have {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pluginRunsIn reports whether a plugin participates in the given
