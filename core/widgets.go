@@ -85,6 +85,16 @@ type Widget struct {
 	// happens if it is left blank.
 	ConfigHint string
 
+	// Feature, when set, is the key of a core.Feature this widget belongs to
+	// (features.go). With that feature switched off the widget is not listed
+	// by Widgets and not resolvable by WidgetBySlug, so an existing PLACEMENT
+	// of it renders nothing — which is the behaviour that matters: an operator
+	// switching a feature off should not also have to go and un-place it, and
+	// should find it still placed when they switch it back on.
+	//
+	// Empty is the common case: a widget not named by a feature is always on.
+	Feature string
+
 	// Render returns an HTML fragment. Returning ("", nil) is the correct way
 	// to say "nothing to show here" — a host drops the widget entirely rather
 	// than drawing an empty box around it.
@@ -147,9 +157,19 @@ func (c *Core) RegisterWidget(w Widget) error {
 // does not.
 func (c *Core) Widgets() []Widget {
 	c.widgetMu.RLock()
-	defer c.widgetMu.RUnlock()
-	out := make([]Widget, len(c.widgets))
-	copy(out, c.widgets)
+	raw := make([]Widget, len(c.widgets))
+	copy(raw, c.widgets)
+	c.widgetMu.RUnlock()
+
+	// Switched-off features drop out here, which is what makes an existing
+	// placement of one render nothing without the placement being deleted.
+	// FeatureOn takes its own lock, so it is called outside the one above.
+	out := raw[:0]
+	for _, w := range raw {
+		if FeatureOn(c, w.Feature) {
+			out = append(out, w)
+		}
+	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Weight < out[j].Weight })
 	return out
 }
@@ -159,13 +179,24 @@ func (c *Core) Widgets() []Widget {
 // switched off since — reports missing rather than rendering something else.
 func (c *Core) WidgetBySlug(slug string) (Widget, bool) {
 	c.widgetMu.RLock()
-	defer c.widgetMu.RUnlock()
+	var found Widget
+	ok := false
 	for _, w := range c.widgets {
 		if w.Slug == slug {
-			return w, true
+			found, ok = w, true
+			break
 		}
 	}
-	return Widget{}, false
+	c.widgetMu.RUnlock()
+	// A widget whose feature is off reports MISSING, which is the same answer
+	// a placement gets for a plugin that is no longer loaded — and hosts
+	// already handle that by rendering nothing. Reusing the existing answer
+	// beats inventing a second one that every caller would have to learn.
+	// FeatureOn takes its own lock, so it is called outside the one above.
+	if !ok || !FeatureOn(c, found.Feature) {
+		return Widget{}, false
+	}
+	return found, true
 }
 
 // ── per-item context, for widgets placed on a page ABOUT something ──────────

@@ -129,6 +129,17 @@ type Core struct {
 	// of somebody's site at the next build.
 	Flavours []string
 
+	// FeatureState answers whether a switchable capability is on
+	// (features.go). OPTIONAL: nil means the host has adopted no
+	// feature flags, and every feature reports its registered
+	// default — which is what a host that has never heard of them
+	// must keep getting.
+	FeatureState FeatureService
+
+	// The feature catalogue, declared by plugins in Provision.
+	featMu   sync.Mutex
+	features map[string]Feature
+
 	// Extension registry (see extensions.go): the cross-plugin
 	// service directory behind Register/Lookup. Lazily
 	// initialised so &Core{} test literals stay valid.

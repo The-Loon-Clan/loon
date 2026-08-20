@@ -78,6 +78,15 @@ type View struct {
 	// at boot and only role-filter per request, so this costs nothing hot.
 	Nav NavHint
 
+	// Feature, when set, is the key of a core.Feature this view belongs to
+	// (features.go). With that feature switched off the view is not listed by
+	// Views, so it vanishes from every nav and index a host builds from it —
+	// and the host is expected to refuse its routes too, since a route mounted
+	// at boot stays mounted.
+	//
+	// Empty is the common case: a view not named by a feature is always on.
+	Feature string
+
 	Render  func(c *gin.Context) (template.HTML, error)
 	Actions map[string]func(c *gin.Context) (template.HTML, error)
 }
@@ -128,8 +137,41 @@ func (c *Core) RegisterView(v View) error {
 	return nil
 }
 
-// Views returns the registered views for one slot, in registration order.
+// Views returns the registered views for one slot, in registration order,
+// omitting any whose Feature is switched off.
+//
+// The filter lives HERE rather than at each consumer because this is the one
+// choke point every one of them goes through — a nav builder, an admin index,
+// a route mounter. A host filtering for itself would have to remember at each,
+// and the one it forgot would be a link to a page that is no longer there.
 func (c *Core) Views(slot ViewSlot) []View {
+	c.viewMu.Lock()
+	raw := make([]View, 0, len(c.views))
+	for _, v := range c.views {
+		if v.Slot == slot {
+			raw = append(raw, v)
+		}
+	}
+	c.viewMu.Unlock()
+
+	// FeatureOn takes its own lock, so it is called outside the one above.
+	out := raw[:0]
+	for _, v := range raw {
+		if FeatureOn(c, v.Feature) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// AllViews returns every registered view for a slot INCLUDING the ones a
+// switched-off feature hides.
+//
+// For the admin surfaces that have to show what exists rather than what is
+// currently on — a feature page listing what a toggle governs, a route mounter
+// that must mount everything and refuse at request time. Everything else wants
+// Views.
+func (c *Core) AllViews(slot ViewSlot) []View {
 	c.viewMu.Lock()
 	defer c.viewMu.Unlock()
 	var out []View
