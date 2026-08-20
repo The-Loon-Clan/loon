@@ -41,6 +41,13 @@ type Deps struct {
 	HTTPClient    HTTPClientService
 	Errors        ErrorReporter
 
+	// FeatureState answers whether a switchable capability is on
+	// (features.go). OPTIONAL: nil means the host has adopted no
+	// feature flags and every feature reports the default its plugin
+	// declared — which is what a host that has never heard of them
+	// must keep getting.
+	FeatureState FeatureService
+
 	// Redis is the sole OPTIONAL dep: leave it nil on a host without
 	// Redis. New does not validate it (see Core.Redis). Set it via
 	// core.NewRedis(client) when the host runs Redis.
@@ -91,6 +98,7 @@ func New(d Deps) (*Core, error) {
 	return &Core{
 		Process:       d.Process,
 		Flavours:      d.Flavours,
+		FeatureState:  d.FeatureState,
 		Users:         d.Users,
 		Auth:          d.Auth,
 		RBAC:          d.RBAC,
