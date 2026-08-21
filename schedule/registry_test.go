@@ -1,6 +1,9 @@
 package schedule
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestPausePersistsAcrossRegistration pins the pause-persistence contract:
 // PauseJob writes through SavePaused, and a re-registration (i.e. a process
@@ -94,6 +97,90 @@ func TestTriggerJobRespectsTheWriteGate(t *testing.T) {
 		j.SetTrigger(func() { ran = true })
 		if !reg.TriggerJob("tg-offpeak") || !ran {
 			t.Error("off-peak blocked a manual trigger; overriding off-peak by hand is the point of one")
+		}
+	})
+}
+
+// TestTriggerJobRespectsPause is the other half of the gate above, and it was
+// missing for the same reason.
+//
+// ServiceLoop checks IsPaused ahead of every scheduled tick, and its comment
+// says why it lives there: the Pause button then works for EVERY loop-driven
+// job "not just the ones that remembered to". The MANUAL path does not go
+// through the loop, so it was covered by nothing — on 20 Aug 2026, 33 triggers
+// across 18 plugins ran regardless of pause, each having been expected to ask
+// for itself and none doing so.
+//
+// core.Job's documentation already put the responsibility here: "RunLoop
+// already skips a paused job... This is for the MANUAL trigger, which does not
+// go through the loop: without it, 'run now' on a paused job runs it, which is
+// not what pausing means."
+func TestTriggerJobRespectsPause(t *testing.T) {
+	prevW, prevO := WriteGate, OffPeakGate
+	defer func() { WriteGate, OffPeakGate = prevW, prevO }()
+	WriteGate = func() bool { return true }
+	OffPeakGate = func() bool { return true }
+
+	t.Run("a paused job is refused", func(t *testing.T) {
+		reg := NewRegistry()
+		ran := false
+		j := reg.RegisterJob("tg-paused", "t")
+		j.SetTrigger(func() { ran = true })
+		if !reg.PauseJob("tg-paused") {
+			t.Fatal("PauseJob did not pause the job")
+		}
+		if reg.TriggerJob("tg-paused") {
+			t.Error("TriggerJob reported success on a paused job")
+		}
+		if ran {
+			t.Error("a paused job ran from a manual trigger — that is not what pausing means")
+		}
+	})
+
+	t.Run("resuming makes it triggerable again", func(t *testing.T) {
+		reg := NewRegistry()
+		ran := false
+		j := reg.RegisterJob("tg-resume", "t")
+		j.SetTrigger(func() { ran = true })
+		reg.PauseJob("tg-resume")
+		reg.ResumeJob("tg-resume")
+		if !reg.TriggerJob("tg-resume") || !ran {
+			t.Error("a resumed job was still refused")
+		}
+	})
+
+	t.Run("an unpaused job is unaffected", func(t *testing.T) {
+		reg := NewRegistry()
+		ran := false
+		j := reg.RegisterJob("tg-plain", "t")
+		j.SetTrigger(func() { ran = true })
+		if !reg.TriggerJob("tg-plain") || !ran {
+			t.Error("the pause gate refused a job that was never paused")
+		}
+	})
+
+	// The refusal is LOGGED, or an operator clicks Run now, nothing happens,
+	// and the job's own log says nothing about why.
+	t.Run("the refusal says why", func(t *testing.T) {
+		reg := NewRegistry()
+		j := reg.RegisterJob("tg-says", "t")
+		j.SetTrigger(func() {})
+		reg.PauseJob("tg-says")
+		reg.TriggerJob("tg-says")
+
+		var found bool
+		for _, s := range reg.GetAllSnapshots() {
+			if s.Name != "tg-says" {
+				continue
+			}
+			for _, line := range s.Logs {
+				if strings.Contains(line, "paused") {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Error("the refusal left nothing in the job log")
 		}
 	})
 }

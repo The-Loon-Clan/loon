@@ -576,6 +576,12 @@ func (r *Registry) TriggerJob(name string) bool {
 	r.mu.RLock()
 	fn := found.triggerFunc
 	status := found.Status
+	// Read under the SAME lock as the rest: the pause handler mutates Paused,
+	// and IsPaused below would take the lock a second time — two acquisitions
+	// on one decision is how a job gets refused for a pause that was lifted in
+	// between, or run because it was applied in between.
+	paused := found.Paused
+	writes := found.Writes
 	r.mu.RUnlock()
 
 	// A manual trigger is still a WRITE if the job writes.
@@ -592,8 +598,34 @@ func (r *Registry) TriggerJob(name string) bool {
 	// off-peak is the documented, useful behaviour ("I know it is busy, run it
 	// anyway"). Read-only is different in kind — it is not a preference about
 	// timing, it is a statement that writes must not happen at all.
-	if fn != nil && found.Writes && !WriteGate() {
+	if fn != nil && writes && !WriteGate() {
 		found.Log("Manual trigger REFUSED: the site is read-only (write gate)")
+		return false
+	}
+
+	// A paused job stays paused when somebody clicks "Run now".
+	//
+	// The same half-installed gate as the write one above, found the same way.
+	// ServiceLoop checks IsPaused ahead of every scheduled tick — and its
+	// comment says the point of putting it there is that the Pause button then
+	// works for EVERY loop-driven job "not just the ones that remembered to".
+	// The manual path did not go through the loop and so was covered by
+	// nothing: on 20 Aug 2026, 33 triggers across 18 plugins ran regardless of
+	// pause, because each was expected to ask for itself and none did.
+	//
+	// core.Job's own documentation already said this is where it belongs:
+	// "RunLoop already skips a paused job, so a loop-driven tick does not need
+	// to ask. This is for the MANUAL trigger, which does not go through the
+	// loop: without it, 'Run now' on a paused job runs it, which is not what
+	// pausing means."
+	//
+	// Deliberately UNLIKE the off-peak gate, which a manual trigger overrides
+	// on purpose ("I know it is busy, run it anyway"). Off-peak is a
+	// preference about timing; pause is an operator saying this must not run.
+	// An operator who wants one run resumes the job, which is one click and
+	// says what they meant.
+	if fn != nil && paused {
+		found.Log("Manual trigger REFUSED: paused by admin (resume it to run)")
 		return false
 	}
 
