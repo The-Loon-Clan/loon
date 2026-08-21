@@ -20,6 +20,27 @@ import (
 // value saved here is read by any process that registered the same-named
 // service (e.g. a MarkRemote stub for the loon-api read tier — see
 // LOON-DISTRIBUTED).
+// CSRFContextKey is where this package looks for a host's CSRF token when
+// rendering the config form.
+//
+// A CONVENTION RATHER THAN AN ARGUMENT, so that adding this breaks nobody:
+// JobConfigHandler's signature is unchanged and every existing caller keeps
+// working. A host that sets the key on the gin context gets a hidden _csrf
+// field in the form; a host that does not gets the form exactly as before.
+//
+// Why it matters: this is a browser-rendered ADMIN form, and until it could
+// carry a token the only way for a host to keep its CSRF guard was to EXEMPT
+// the route -- which loon-demo-site did, with a comment explaining that the
+// framework's page could not embed one. An exemption in the reference
+// implementation is an exemption in everything copied from it.
+//
+// The field name and the context key are the double-submit pattern's usual
+// ones. A host that spells them differently should render its own form.
+const CSRFContextKey = "csrf_token"
+
+// CSRFFieldName is the form field the token is submitted in.
+const CSRFFieldName = "_csrf"
+
 func JobConfigHandler(reg *Registry) gin.HandlerFunc {
 	if reg == nil {
 		reg = Default
@@ -35,10 +56,12 @@ func JobConfigHandler(reg *Registry) gin.HandlerFunc {
 		g.Header("Content-Type", "text/html; charset=utf-8")
 		g.Status(http.StatusOK)
 		_ = tmpl.Execute(g.Writer, jobConfigView{
-			Name:  job.Name,
-			Desc:  job.Description,
-			Vars:  job.ConfigSnapshot(),
-			Saved: g.Query("saved") == "1",
+			Name:      job.Name,
+			Desc:      job.Description,
+			Vars:      job.ConfigSnapshot(),
+			Saved:     g.Query("saved") == "1",
+			CSRFField: CSRFFieldName,
+			CSRFToken: g.GetString(CSRFContextKey),
 		})
 	}
 }
@@ -85,6 +108,11 @@ type jobConfigView struct {
 	Desc  string
 	Vars  []JobConfigSnapshot
 	Saved bool
+	// Empty when the host sets no token, in which case the field is not
+	// rendered at all. Rendering an empty one would look like a guard and
+	// submit nothing.
+	CSRFField string
+	CSRFToken string
 }
 
 const jobConfigHTML = `<!doctype html>
@@ -103,6 +131,7 @@ const jobConfigHTML = `<!doctype html>
     <p class="text-muted small mb-3">{{.Desc}}</p>
     {{if .Saved}}<div class="alert alert-success py-2">Saved.</div>{{end}}
     <form method="post" action="/admin/jobs/config">
+        {{if .CSRFToken}}<input type="hidden" name="{{.CSRFField}}" value="{{.CSRFToken}}">{{end}}
         <input type="hidden" name="name" value="{{.Name}}">
         {{range .Vars}}
         <div class="mb-3">
