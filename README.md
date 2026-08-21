@@ -161,6 +161,23 @@ this host does not have. Those are worth surfacing because a listener for an
 event that never fires is completely silent, and silence is exactly what it
 looks like when everything is fine.
 
+## Building and contributing
+
+```sh
+make help      # the targets
+make check     # everything CI runs: fmt, vet, sqllint, test
+```
+
+The toolchain runs in a container (`scripts/go.sh` says why); `make check GO=go`
+uses the one on your machine instead, which is what CI does. There is no
+database and no integration target: loon defines the storage seam and the host
+fills it, so every test here is a unit test.
+
+`CONTRIBUTING.md` covers what a change to a framework costs — CI builds
+`loon-plugins` against every commit, because loon can be green on its own while
+having broken every consumer. `SECURITY.md` covers reporting and what the
+`httpclient` guards actually promise.
+
 ## Status
 
 Production-proven: loon runs behind a full content site (~19 plugins)

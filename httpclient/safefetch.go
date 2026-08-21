@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -125,13 +126,73 @@ func isBlockedIP(ip net.IP, blocks []*net.IPNet) bool {
 	return false
 }
 
-// safeDialContext returns a DialContext function that resolves the
-// hostname, checks every resolved IP against the blocked ranges, and
-// only connects if all IPs are public. This is the DNS-rebinding-safe
-// version — naive validators that check the URL's hostname before
-// HTTP issue the request lose if DNS resolves to a different IP at
-// dial time (the attacker controls the resolver). Validating inside
-// the dialer is the only correct place.
+// controlPublicOnly returns a net.Dialer.Control that refuses to connect to
+// any address in the blocked ranges.
+//
+// CONTROL, NOT DialContext, AND THE DIFFERENCE IS THE WHOLE GUARD.
+//
+// A check in DialContext is handed the address as it appears in the URL — a
+// HOSTNAME, because resolving is the dialler's job. Resolving it there to
+// inspect the IPs and then dialling the hostname anyway means the connection
+// performs its OWN lookup, and nothing makes the two agree. An attacker
+// serving a low-TTL record answers the first with a public address and the
+// second with 127.0.0.1, and the connection lands inside the network. That is
+// DNS rebinding, and it is precisely what this file used to claim immunity to
+// while doing exactly that.
+//
+// Control runs AFTER resolution and BEFORE connect, once per address the
+// resolver returned, and is handed the actual ip:port about to be dialled. The
+// address refused is the address connected to, so there is no second lookup to
+// disagree with the first.
+//
+// It cannot do the allowlist, which needs the hostname that Control never
+// sees. That check stays in the wrapper below, where the name is still known.
+func controlPublicOnly(blocks []*net.IPNet) func(string, string, syscall.RawConn) error {
+	return func(_, address string, _ syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return fmt.Errorf("%w: unparseable dial address %q", ErrBlockedByPolicy, address)
+		}
+		// Fail closed. By this point the resolver has run, so anything that is
+		// not an IP is something unanticipated rather than a name to look up.
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return fmt.Errorf("%w: %q is not an address at dial time", ErrBlockedByPolicy, host)
+		}
+		if isBlockedIP(ip, blocks) {
+			return fmt.Errorf("%w: %s is in a blocked range", ErrBlockedByPolicy, ip)
+		}
+		return nil
+	}
+}
+
+// safeDialer is the guarded dialer, built separately so a test can assert the
+// one property that matters and cannot be checked any other way: that Control
+// is set. A nil Control is not a behaviour difference a black-box test can see
+// — the dialer still works, still connects, and only fails to refuse the
+// second answer to a rebinding lookup, which needs an attacker-controlled
+// resolver to observe. It was nil for the whole life of this file.
+func safeDialer(blocks []*net.IPNet) *net.Dialer {
+	return &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   controlPublicOnly(blocks),
+	}
+}
+
+// safeDialContext returns a DialContext function that connects only to public
+// addresses, and only to allowed hostnames.
+//
+// TWO LAYERS, WITH DIFFERENT JOBS. Control (above) is the guarantee: it sees
+// the address actually being dialled and is what makes DNS rebinding
+// impossible. The pre-resolution sweep here is the diagnosis, and it is
+// stricter in one useful way — it refuses a host that offers a blocked address
+// at all, even alongside a public one, and it produces an error naming the host
+// and the offending IP rather than an OpError wrapping a Control refusal.
+//
+// A resolver failure here is NOT fatal on its own: Control still runs on
+// whatever the dial resolves. Refusing outright would turn a transient DNS
+// blip into a hard failure on a path that is already protected.
 //
 // allowedHosts, when non-empty, restricts the destination to hostnames
 // that match one of the patterns. Patterns are exact suffixes — e.g.
@@ -139,7 +200,7 @@ func isBlockedIP(ip net.IP, blocks []*net.IPNet) bool {
 // not "anidb.net". Pattern "" or empty list means "any public IP allowed".
 func safeDialContext(allowedHosts []string) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	blocks := blockedIPNets()
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	dialer := safeDialer(blocks)
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -148,16 +209,11 @@ func safeDialContext(allowedHosts []string) func(ctx context.Context, network, a
 		if !hostAllowed(host, allowedHosts) {
 			return nil, fmt.Errorf("%w: host %q not in allowlist", ErrBlockedByPolicy, host)
 		}
-		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-		if err != nil {
-			return nil, err
-		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("%w: no addresses for %q", ErrBlockedByPolicy, host)
-		}
-		for _, ip := range ips {
-			if isBlockedIP(ip.IP, blocks) {
-				return nil, fmt.Errorf("%w: %s resolves to blocked range %s", ErrBlockedByPolicy, host, ip.IP)
+		if ips, err := net.DefaultResolver.LookupIPAddr(ctx, host); err == nil {
+			for _, ip := range ips {
+				if isBlockedIP(ip.IP, blocks) {
+					return nil, fmt.Errorf("%w: %s resolves to blocked range %s", ErrBlockedByPolicy, host, ip.IP)
+				}
 			}
 		}
 		return dialer.DialContext(ctx, network, addr)
@@ -192,9 +248,15 @@ func hostAllowed(host string, allowed []string) bool {
 // prevent SSRF probes of internal services (Redis, Postgres, cloud
 // metadata, link-local).
 //
-// DNS rebinding-safe: every resolved IP is checked at dial time, not
-// at URL-parse time, so an attacker cannot register a domain that
-// resolves to a public IP first and a private IP on the connection.
+// DNS rebinding-safe: the check runs in net.Dialer.Control, which is
+// handed the address actually being connected to, after resolution.
+// An attacker cannot register a domain that answers a public IP to one
+// lookup and a private IP to the next, because there is only one
+// lookup that matters and its result is what gets inspected.
+//
+// This comment made the same claim while the check sat in DialContext
+// and re-resolved the hostname to dial it — two lookups, and only the
+// first one guarded. See controlPublicOnly.
 //
 // Each call returns a fresh client with its own transport (no pooling
 // across callers, because the dial validator is closure-bound). The

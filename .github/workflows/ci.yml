@@ -1,0 +1,133 @@
+# Continuous integration.
+#
+# The job calls `make check`, not its own list of steps, so what runs here is
+# exactly what a contributor can run before pushing. A check that lives only in
+# a workflow file cannot be tried locally; one that lives only in a Makefile
+# does not stop anybody. The same target, both places.
+#
+# THIS REPLACES lint-sql.yml. That workflow ran the SQL guard and nothing else,
+# so for as long as it existed loon's 30 test files across 7 packages never ran
+# on a push — the framework the other two repos build against was the only one
+# of the three with no test signal. The SQL guard is now one line of `make
+# check` rather than a second workflow that would run it twice.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly, because the interesting failures on a small project are not the
+  # ones a commit causes — they are a dependency moving, a base image changing,
+  # or the Go toolchain deprecating something. Those arrive on their own
+  # schedule and are cheapest to find before somebody needs to ship.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    # No services. loon depends on no database and no cache — it DEFINES those
+    # seams (core.Storage, the cache interface) and the host supplies them, so
+    # every test here is a unit test. That is a property worth keeping: the day
+    # this job needs a Postgres is the day something in the framework grew a
+    # dependency on one.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # CI must see what a clone sees: the module versions in go.mod, not
+      # somebody's sibling checkouts. loon is the root of the graph and carries
+      # no `replace`, so this is the repo where that has to stay true.
+      - name: Verify a clone builds on its own
+        run: |
+          test ! -f go.work || { echo "go.work is committed; it must not be"; exit 1; }
+          go build ./...
+
+      - name: go.mod is tidy
+        run: make tidy GO=go
+        env:
+          GOWORK: "off"
+
+      # GO=go: CI is already a clean Linux container, so running the toolchain
+      # inside another one buys nothing here. The Docker path exists for
+      # developer machines where an anti-virus quarantines freshly built
+      # binaries; the checks themselves are identical either way.
+      - name: Checks
+        run: make check GO=go
+
+      - name: Known vulnerabilities in code we call
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # A library's coverage is invisible unless something reports it, and it is
+      # one of the few things a stranger can use to judge whether to depend on
+      # this. if: always() so a failed test still shows what was covered.
+      - name: Coverage summary
+        if: always()
+        run: |
+          go tool cover -func=coverage.out > /tmp/cover.txt || exit 0
+          {
+            echo "### Test coverage"
+            echo
+            echo '```'
+            tail -1 /tmp/cover.txt
+            echo '```'
+            echo
+            echo "<details><summary>Per function</summary>"
+            echo
+            echo '```'
+            sort -k3 -r /tmp/cover.txt | head -40
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: ignore
+
+  # The consumers are the real test of a framework: loon can be green on its own
+  # and still have broken every plugin, because what it publishes is INTERFACES,
+  # and removing a method or renaming a field compiles fine here and nowhere
+  # else. This builds the sibling repos against THIS commit.
+  #
+  # Build, not test: their suites are their own repos' business and their own
+  # CI runs them. What this answers is narrower and is the thing loon can break
+  # unilaterally — does the module graph still compile.
+  consumers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: loon
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ameNZB/loon-plugins
+          path: loon-plugins
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: loon/go.mod
+
+      # loon-plugins already carries `replace github.com/the-loon-clan/loon =>
+      # ../loon`, so a sibling checkout is all it needs to compile against this
+      # commit rather than its pinned version.
+      - name: loon-plugins builds against this commit
+        working-directory: loon-plugins
+        run: go build ./...
+        env:
+          GOWORK: "off"
+          GOFLAGS: "-buildvcs=false -mod=mod"
