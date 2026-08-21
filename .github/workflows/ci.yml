@@ -118,6 +118,11 @@ jobs:
           repository: ameNZB/loon-plugins
           path: loon-plugins
 
+      - uses: actions/checkout@v4
+        with:
+          repository: ameNZB/loon-baseline
+          path: loon-baseline
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: loon/go.mod
@@ -125,9 +130,23 @@ jobs:
       # loon-plugins already carries `replace github.com/the-loon-clan/loon =>
       # ../loon`, so a sibling checkout is all it needs to compile against this
       # commit rather than its pinned version.
+      # go vet as well as go build: build ignores _test.go, and a consumer's
+      # test FAKE implements loon's interfaces. Widening one breaks the fake
+      # and leaves the build green — that happened on 2026-08-07 and went
+      # unnoticed for two commits.
       - name: loon-plugins builds against this commit
         working-directory: loon-plugins
-        run: go build ./...
+        run: go build ./... && go vet ./...
+        env:
+          GOWORK: "off"
+          GOFLAGS: "-buildvcs=false -mod=mod"
+
+      # loon-baseline consumes loon too, and it is the one holding
+      # authentication, sessions and password hashing. It was missing from this
+      # job when it was written.
+      - name: loon-baseline builds against this commit
+        working-directory: loon-baseline
+        run: go build ./... && go vet ./...
         env:
           GOWORK: "off"
           GOFLAGS: "-buildvcs=false -mod=mod"
