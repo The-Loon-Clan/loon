@@ -123,6 +123,11 @@ jobs:
           repository: ameNZB/loon-baseline
           path: loon-baseline
 
+      - uses: actions/checkout@v4
+        with:
+          repository: ameNZB/loon-demo-site
+          path: loon-demo-site
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: loon/go.mod
@@ -146,6 +151,29 @@ jobs:
       # job when it was written.
       - name: loon-baseline builds against this commit
         working-directory: loon-baseline
+        run: go build ./... && go vet ./...
+        env:
+          GOWORK: "off"
+          GOFLAGS: "-buildvcs=false -mod=mod"
+
+      # The host pins its siblings by pseudo-version, not by `replace`, so
+      # without this redirect it would compile against the last PUSHED loon
+      # and say nothing about the commit under test. All three siblings are
+      # redirected, not just this one: a working-tree loon against pinned
+      # siblings is a combination nobody runs, and a failure there would be
+      # noise rather than signal.
+      - name: Point the host at these working trees
+        working-directory: loon-demo-site
+        run: |
+          go mod edit \
+            -replace github.com/the-loon-clan/loon=../loon \
+            -replace github.com/the-loon-clan/loon-plugins=../loon-plugins \
+            -replace github.com/the-loon-clan/loon-baseline=../loon-baseline
+        env:
+          GOWORK: "off"
+
+      - name: loon-demo-site builds against this commit
+        working-directory: loon-demo-site
         run: go build ./... && go vet ./...
         env:
           GOWORK: "off"
