@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"github.com/the-loon-clan/loon/core"
 	"html/template"
 	"net/http"
 
@@ -36,10 +37,10 @@ import (
 //
 // The field name and the context key are the double-submit pattern's usual
 // ones. A host that spells them differently should render its own form.
-const CSRFContextKey = "csrf_token"
+const CSRFContextKey = core.CSRFContextKey
 
 // CSRFFieldName is the form field the token is submitted in.
-const CSRFFieldName = "_csrf"
+const CSRFFieldName = core.CSRFFieldName
 
 func JobConfigHandler(reg *Registry) gin.HandlerFunc {
 	if reg == nil {

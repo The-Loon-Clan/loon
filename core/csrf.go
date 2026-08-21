@@ -28,6 +28,34 @@ import "github.com/gin-gonic/gin"
 // Provision.
 const CSRFTokenName = "csrf.token"
 
+// CSRFContextKey is where a host's middleware puts the token for the request
+// being served, and CSRFFieldName is the form field it must be submitted in.
+//
+// THE SECOND WAY IN, and it exists because the first one needs a *Core. A
+// double-submit middleware already sets this so its own templates can read it;
+// a renderer that has the gin context but was never handed the Core — every
+// core.View in loon-baseline, and schedule's bundled config page — can get the
+// token from here without its constructor growing a parameter.
+//
+// Prefer the registry when you have a *Core: it is explicit about who
+// published what. Use this when you do not.
+const (
+	CSRFContextKey = "csrf_token"
+	CSRFFieldName  = "_csrf"
+)
+
+// CSRFFromRequest reads the token a host's middleware left on this request,
+// empty when there is none.
+//
+// Empty is not an error, for the reason CSRFToken's comment gives: a host with
+// no CSRF middleware is legitimate. Render the field anyway.
+func CSRFFromRequest(gc *gin.Context) string {
+	if gc == nil {
+		return ""
+	}
+	return gc.GetString(CSRFContextKey)
+}
+
 // CSRFTokenFunc mints the token for one request. Registered AS this type — a
 // bare func never survives the registry's type assertion.
 type CSRFTokenFunc func(*gin.Context) string
