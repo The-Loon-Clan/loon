@@ -1,9 +1,11 @@
 package schedule
 
 import (
-	"github.com/the-loon-clan/loon/core"
 	"html/template"
+	"log"
 	"net/http"
+
+	"github.com/the-loon-clan/loon/core"
 
 	"github.com/gin-gonic/gin"
 )
@@ -56,14 +58,19 @@ func JobConfigHandler(reg *Registry) gin.HandlerFunc {
 		}
 		g.Header("Content-Type", "text/html; charset=utf-8")
 		g.Status(http.StatusOK)
-		_ = tmpl.Execute(g.Writer, jobConfigView{
+		// Logged, not discarded -- see JobsAdminHandler. The status is already
+		// out, so a template error here is a page that ends mid-form and still
+		// reads as 200 to everything upstream.
+		if err := tmpl.Execute(g.Writer, jobConfigView{
 			Name:      job.Name,
 			Desc:      job.Description,
 			Vars:      job.ConfigSnapshot(),
 			Saved:     g.Query("saved") == "1",
 			CSRFField: CSRFFieldName,
 			CSRFToken: g.GetString(CSRFContextKey),
-		})
+		}); err != nil {
+			log.Printf("schedule: job config page stopped mid-render: %v", err)
+		}
 	}
 }
 
