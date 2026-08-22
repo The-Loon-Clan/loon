@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"html/template"
+	"log"
 	"net/http"
 	"time"
 
@@ -39,7 +40,21 @@ func JobsAdminHandler(reg *Registry) gin.HandlerFunc {
 		}
 		g.Header("Content-Type", "text/html; charset=utf-8")
 		g.Status(http.StatusOK)
-		_ = tmpl.Execute(g.Writer, jobsView{Services: services, Jobs: jobs})
+		// NOT discarded. html/template aborts on the first error, and the
+		// status and headers are already out -- so a failure here is a page
+		// that stops mid-document and still reads as 200 to everything
+		// upstream. That is exactly how $.CSRFToken addressing the wrong
+		// data went unnoticed: the form rendered, the token did not, and
+		// nothing said so. The response cannot be rescued at this point,
+		// but it can stop being silent.
+		if err := tmpl.Execute(g.Writer, jobsView{
+			Services:  services,
+			Jobs:      jobs,
+			CSRFField: CSRFFieldName,
+			CSRFToken: g.GetString(CSRFContextKey),
+		}); err != nil {
+			log.Printf("schedule: jobs admin page stopped mid-render: %v", err)
+		}
 	}
 }
 
@@ -86,9 +101,29 @@ func JobsControlHandler(reg *Registry) gin.HandlerFunc {
 	}
 }
 
+// jobTable is what {{define "jobtable"}} is invoked with. It used to be
+// handed a bare []JobSnapshot, which is why the control forms could not see
+// the token: inside a define, $ is that template's own argument.
+type jobTable struct {
+	Rows      []JobSnapshot
+	CSRFField string
+	CSRFToken string
+}
+
 type jobsView struct {
 	Services []JobSnapshot
 	Jobs     []JobSnapshot
+
+	// Empty unless the host published a token on the gin context, exactly as
+	// JobConfigHandler does -- see CSRFContextKey's comment in
+	// config_admin.go for why this is a convention and not an argument.
+	CSRFField string
+	CSRFToken string
+}
+
+// Table pairs a row set with the token, for {{template "jobtable"}}.
+func (v jobsView) Table(rows []JobSnapshot) jobTable {
+	return jobTable{Rows: rows, CSRFField: v.CSRFField, CSRFToken: v.CSRFToken}
 }
 
 var jobsFuncs = template.FuncMap{
@@ -129,12 +164,12 @@ const jobsAdminHTML = `<!doctype html>
 
     {{if .Services}}
     <h2 class="h5 mb-2">Services</h2>
-    {{template "jobtable" .Services}}
+    {{template "jobtable" (.Table .Services)}}
     {{end}}
 
     <h2 class="h5 mb-2 mt-4">Jobs</h2>
     {{if .Jobs}}
-    {{template "jobtable" .Jobs}}
+    {{template "jobtable" (.Table .Jobs)}}
     {{else}}
     <div class="alert alert-secondary"><strong>No jobs registered.</strong></div>
     {{end}}
@@ -158,7 +193,7 @@ const jobsAdminHTML = `<!doctype html>
             </tr>
         </thead>
         <tbody>
-        {{range .}}
+        {{range .Rows}}
             <tr>
                 <td><code>{{.Name}}</code><div class="text-muted small">{{.Description}}</div></td>
                 <td>
@@ -177,12 +212,14 @@ const jobsAdminHTML = `<!doctype html>
                 <td>
                     {{if .Triggerable}}
                     <form method="post" action="/admin/jobs/control" class="d-inline">
+                        {{if $.CSRFToken}}<input type="hidden" name="{{$.CSRFField}}" value="{{$.CSRFToken}}">{{end}}
                         <input type="hidden" name="name" value="{{.Name}}">
                         <input type="hidden" name="action" value="trigger">
                         <button class="btn btn-sm btn-outline-primary py-0">Run</button>
                     </form>
                     {{end}}
                     <form method="post" action="/admin/jobs/control" class="d-inline">
+                        {{if $.CSRFToken}}<input type="hidden" name="{{$.CSRFField}}" value="{{$.CSRFToken}}">{{end}}
                         <input type="hidden" name="name" value="{{.Name}}">
                         <input type="hidden" name="action" value="{{if .Paused}}resume{{else}}pause{{end}}">
                         <button class="btn btn-sm btn-outline-secondary py-0">{{if .Paused}}Resume{{else}}Pause{{end}}</button>
